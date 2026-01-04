@@ -16,7 +16,7 @@ jobs:
     - name: 파이썬 설치
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10' 
+        python-version: '3.11' 
 
     - name: 라이브러리 설치
       run: |
@@ -26,7 +26,7 @@ jobs:
       # [주의] 윈도우는 구분자가 세미콜론(;) 입니다.
       # 아이콘이 있다면 --icon "icon.ico" 옵션을 추가하세요.
       run: |
-        pyinstaller --onefile --noconsole --name "Splendor_Win" --add-data "assets/*.png;assets" gui_main.py
+        pyinstaller --onefile --noconsole --name "Splendor_Win" --add-data "assets/*.png;assets" splendor_lite.py
 
     - name: 결과물 업로드
       uses: actions/upload-artifact@v4
@@ -45,7 +45,7 @@ jobs:
     - name: 파이썬 설치
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: '3.11'
 
     - name: 라이브러리 설치
       run: |
@@ -54,7 +54,7 @@ jobs:
     - name: 맥용 빌드 시작
       # [주의] 맥은 구분자가 콜론(:) 입니다. 여기가 핵심입니다!
       run: |
-        pyinstaller --onefile --noconsole --name "Splendor_Mac" --add-data "assets/*.png:assets" gui_main.py
+        pyinstaller --onefile --noconsole --name "Splendor_Mac" --add-data "assets/*.png:assets" splendor_lite.py
 
     - name: 결과물 업로드
       uses: actions/upload-artifact@v4

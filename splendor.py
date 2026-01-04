@@ -4,6 +4,7 @@ import random
 import traceback
 import glob
 import os
+import json
 from itertools import combinations
 from sb3_contrib import MaskablePPO
 from game import Game
@@ -287,13 +288,20 @@ class SplendorApp:
             return
 
         self.network = Network()
-        welcome = self.network.connect(ip, port, name)
+        welcome_str = self.network.connect(ip, port, name)
         
-        if welcome:
-            print(f"Connected! Server says: {welcome}")
-            self.log_action(f"Connected to {ip}")
-            # For now, just a placeholder transition
-            self.state = "ONLINE_LOBBY"
+        if welcome_str:
+            try:
+                data = json.loads(welcome_str)
+                if data.get("type") == "WELCOME":
+                    self.my_player_id = data.get("player_id")
+                    print(f"Connected! My ID: {self.my_player_id}")
+                    self.log_action(f"Connected as {self.my_player_id}")
+                    self.set_state("ONLINE_LOBBY")
+                else:
+                    self.log_action("Unexpected server response.")
+            except:
+                self.log_action("Failed to parse server greeting.")
         else:
             self.log_action("Connection Failed!")
             self.network = None
@@ -358,6 +366,111 @@ class SplendorApp:
             print(f"Error taking tokens: {e}")
             traceback.print_exc()
             self.clear_selected_tokens()
+
+    def req_create_room(self):
+        name = self.room_name_input.text.strip()
+        if not name: return
+        msg = {"type": "CREATE_ROOM", "name": name, "max_players": 4}
+        self.network.send(json.dumps(msg))
+
+    def req_join_room(self, room_id):
+        msg = {"type": "JOIN_ROOM", "room_id": room_id}
+        self.network.send(json.dumps(msg))
+
+    def req_leave_room(self):
+        msg = {"type": "LEAVE_ROOM"}
+        self.network.send(json.dumps(msg))
+        self.set_state("ONLINE_LOBBY")
+        self.current_room_info = None
+
+    def req_room_list(self):
+        msg = {"type": "GET_ROOMS"}
+        self.network.send(json.dumps(msg))
+
+    def req_start_game(self):
+        pass # To be implemented
+
+    def handle_network_messages(self):
+        if not self.network: return
+        
+        try:
+            raw_data = self.network.receive()
+            if not raw_data: return
+            
+            # The server might send multiple JSON objects stuck together or in fragments.
+            # Ideally, we should buffer. For this simple case, we assume one packet = one JSON 
+            # OR simple splitting if the server sends "}{".
+            # For robustness, let's just try to parse the whole string.
+            
+            # Simple hack for multiple json messages:
+            raw_data = raw_data.replace('}{', '}|{')
+            messages = raw_data.split('|')
+            
+            for msg_str in messages:
+                data = json.loads(msg_str)
+                msg_type = data.get("type")
+                
+                if msg_type == "ROOM_LIST":
+                    self.lobby_rooms = data.get("rooms", [])
+                    self.update_room_buttons()
+                    
+                elif msg_type == "ROOM_CREATED":
+                    # I created a room, so I join it automatically
+                    self.current_room_info = data.get("room")
+                    self.is_host = (self.current_room_info["host"] == self.my_player_id)
+                    self.set_state("ONLINE_ROOM")
+                    
+                elif msg_type == "JOINED_ROOM":
+                    # I joined a room
+                    self.current_room_info = data.get("room")
+                    self.is_host = (self.current_room_info["host"] == self.my_player_id)
+                    self.set_state("ONLINE_ROOM")
+                    
+                elif msg_type == "PLAYER_JOINED":
+                    # Someone else joined my room
+                    if self.state == "ONLINE_ROOM":
+                        self.current_room_info = data.get("room")
+                        p_id = data.get("player_id")
+                        self.log_action(f"{p_id} joined the room.")
+
+                elif msg_type == "PLAYER_LEFT":
+                    if self.state == "ONLINE_ROOM":
+                        self.current_room_info = data.get("room")
+                        p_id = data.get("player_id")
+                        self.log_action(f"{p_id} left the room.")
+                        
+                elif msg_type == "HOST_CHANGED":
+                    new_host = data.get("new_host")
+                    if self.state == "ONLINE_ROOM":
+                        self.current_room_info["host"] = new_host
+                        self.is_host = (new_host == self.my_player_id)
+                        self.log_action(f"Host changed to {new_host}")
+
+                elif msg_type == "ERROR":
+                    self.log_action(f"Server Error: {data.get('message')}")
+
+        except json.JSONDecodeError:
+            print("JSON Error in network msg")
+        except Exception as e:
+            print(f"Net Handle Error: {e}")
+
+    def update_room_buttons(self):
+        self.room_join_buttons = []
+        start_y = 150
+        for room in self.lobby_rooms:
+            label = f"{room['name']} ({len(room['players'])}/{room['max_players']})"
+            # Status
+            if room['started']: label += " [PLAYING]"
+            
+            btn = Button("JOIN " + label, 50, start_y, 400, 50, lambda rid=room['id']: self.req_join_room(rid))
+            if room['started'] or len(room['players']) >= room['max_players']:
+                btn.color = GRAY
+                btn.is_active = False # Can't join full/started
+            else:
+                btn.color = GREEN
+            
+            self.room_join_buttons.append(btn)
+            start_y += 60
 
     def draw_text_with_outline(self, text, font, x, y, text_color, outline_color, outline_width=1):
         # Render outline (Iterate through a square grid to fill gaps)
@@ -802,16 +915,58 @@ class SplendorApp:
 
     def draw_online_lobby(self):
         self.screen.fill(WHITE)
-        title_surf = self.font_l.render(f"Lobby - Welcome, {self.online_name_input.text}", True, BLACK)
-        title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 100))
-        self.screen.blit(title_surf, title_rect)
+        title_surf = self.font_l.render(f"Lobby - ID: {self.my_player_id}", True, BLACK)
+        self.screen.blit(title_surf, (50, 30))
         
-        info = self.font_m.render("Server connection established. Lobby UI coming soon...", True, DARK_GRAY)
-        self.screen.blit(info, (SCREEN_WIDTH//2 - 250, 300))
+        # Room List Area
+        pygame.draw.rect(self.screen, (240, 240, 240), (40, 100, 420, 530))
+        pygame.draw.rect(self.screen, BLACK, (40, 100, 420, 530), 2)
         
-        back_btn = Button("DISCONNECT", SCREEN_WIDTH//2 - 150, 600, 300, 60, self.disconnect_network, color=RED_ERROR)
+        if not self.room_join_buttons:
+            info = self.font_m.render("No rooms found...", True, DARK_GRAY)
+            self.screen.blit(info, (100, 150))
+            
+        for btn in self.room_join_buttons:
+            btn.draw(self.screen)
+            
+        # Create Room Area (Right Side)
+        pygame.draw.rect(self.screen, (230, 230, 250), (SCREEN_WIDTH - 400, 100, 350, 300))
+        pygame.draw.rect(self.screen, BLACK, (SCREEN_WIDTH - 400, 100, 350, 300), 2)
+        
+        lbl = self.font_m.render("Create New Room", True, BLACK)
+        self.screen.blit(lbl, (SCREEN_WIDTH - 350, 120))
+        
+        self.room_name_input.draw(self.screen)
+        self.btn_create_room.draw(self.screen)
+        self.btn_refresh_rooms.draw(self.screen)
+        
+        back_btn = Button("DISCONNECT", SCREEN_WIDTH - 250, 650, 200, 50, self.disconnect_network, color=RED_ERROR)
         back_btn.draw(self.screen)
-        self.temp_back_btn = back_btn # Quick hack for click detection
+        self.temp_back_btn = back_btn 
+
+    def draw_online_room(self):
+        self.screen.fill(WHITE)
+        if not self.current_room_info: return
+        
+        r = self.current_room_info
+        title = f"Room: {r['name']} ({len(r['players'])}/{r['max_players']})"
+        t_surf = self.font_xl.render(title, True, BLACK)
+        t_rect = t_surf.get_rect(center=(SCREEN_WIDTH//2, 80))
+        self.screen.blit(t_surf, t_rect)
+        
+        # Player List
+        y = 200
+        for i, pid in enumerate(r['players']):
+            role = "HOST" if pid == r['host'] else "PLAYER"
+            color = GREEN if pid == self.my_player_id else BLACK
+            p_text = f"{i+1}. {pid} [{role}]"
+            p_surf = self.font_l.render(p_text, True, color)
+            self.screen.blit(p_surf, (SCREEN_WIDTH//2 - 150, y))
+            y += 50
+            
+        self.btn_leave_room.draw(self.screen)
+        if self.is_host:
+            self.btn_start_online_game.draw(self.screen)
 
     def disconnect_network(self):
         if self.network:
@@ -1313,6 +1468,15 @@ class SplendorApp:
         try:
             running = True
             while running:
+                # Network Tick
+                if self.state in ["ONLINE_LOBBY", "ONLINE_ROOM", "ONLINE_GAME"]:
+                    self.handle_network_messages()
+                    # Auto refresh lobby
+                    if self.state == "ONLINE_LOBBY":
+                        if pygame.time.get_ticks() - self.last_room_fetch > 2000:
+                            self.req_room_list()
+                            self.last_room_fetch = pygame.time.get_ticks()
+
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
@@ -1329,8 +1493,18 @@ class SplendorApp:
                         self.online_back_button.check_click(event)
                     
                     elif self.state == "ONLINE_LOBBY":
+                        self.room_name_input.handle_event(event)
+                        self.btn_create_room.check_click(event)
+                        self.btn_refresh_rooms.check_click(event)
                         if hasattr(self, 'temp_back_btn'):
                             self.temp_back_btn.check_click(event)
+                        for btn in self.room_join_buttons:
+                            btn.check_click(event)
+
+                    elif self.state == "ONLINE_ROOM":
+                        self.btn_leave_room.check_click(event)
+                        if self.is_host:
+                            self.btn_start_online_game.check_click(event)
 
                     elif self.state == "AI_VS_USER":
                         if event.type == pygame.MOUSEBUTTONDOWN:
@@ -1379,6 +1553,8 @@ class SplendorApp:
                     self.draw_online_connect()
                 elif self.state == "ONLINE_LOBBY":
                     self.draw_online_lobby()
+                elif self.state == "ONLINE_ROOM":
+                    self.draw_online_room()
                 elif self.state == "AI_VS_USER":
                     self.draw_game_board()
                 elif self.state == "GAME_OVER":
