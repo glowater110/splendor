@@ -1,0 +1,63 @@
+name: Build Splendor Game
+
+on:
+  push:
+    branches: [ "main" ]  # main 브랜치에 코드가 올라오면 실행됨
+
+jobs:
+  # ---------------------------------------------------
+  # 1. 윈도우(Windows) 실행 파일 만들기
+  # ---------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: 파이썬 설치
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10' 
+
+    - name: 라이브러리 설치
+      run: |
+        pip install -r requirements.txt
+
+    - name: 윈도우용 빌드 시작
+      # [주의] 윈도우는 구분자가 세미콜론(;) 입니다.
+      # 아이콘이 있다면 --icon "icon.ico" 옵션을 추가하세요.
+      run: |
+        pyinstaller --onefile --noconsole --name "Splendor_Win" --add-data "assets/*.png;assets" gui_main.py
+
+    - name: 결과물 업로드
+      uses: actions/upload-artifact@v4
+      with:
+        name: Splendor-Windows
+        path: dist/Splendor_Win.exe
+
+  # ---------------------------------------------------
+  # 2. 맥(macOS) 실행 파일 만들기
+  # ---------------------------------------------------
+  build-macos:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: 파이썬 설치
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: 라이브러리 설치
+      run: |
+        pip install -r requirements.txt
+
+    - name: 맥용 빌드 시작
+      # [주의] 맥은 구분자가 콜론(:) 입니다. 여기가 핵심입니다!
+      run: |
+        pyinstaller --onefile --noconsole --name "Splendor_Mac" --add-data "assets/*.png:assets" gui_main.py
+
+    - name: 결과물 업로드
+      uses: actions/upload-artifact@v4
+      with:
+        name: Splendor-Mac
+        path: dist/Splendor_Mac
