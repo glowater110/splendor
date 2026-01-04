@@ -175,11 +175,11 @@ class SplendorApp:
         # Network Settings
         self.network = None
         self.online_name_input = InputField(center_x, 250, 300, 50, label="Your Name (ID):", initial_text="Player1")
-        self.online_ip_input = InputField(center_x, 350, 300, 50, label="Server IP:", initial_text="127.0.0.1")
-        self.online_port_input = InputField(center_x, 450, 300, 50, label="Port:", initial_text="5555")
+        self.online_ip_input = InputField(center_x, 350, 300, 50, label="Server IP:", initial_text="0.tcp.jp.ngrok.io")
+        self.online_port_input = InputField(center_x, 450, 300, 50, label="Port:", initial_text="12047")
         
-        self.online_connect_button = Button("CONNECT", center_x, 550, 300, 80, self.try_connect, color=GREEN)
-        self.online_back_button = Button("BACK", center_x, 650, 300, 50, lambda: self.set_state("MENU"), color=GRAY)
+        self.online_connect_button = Button("Connect", center_x, 550, 300, 80, self.try_connect, color=GREEN, font_size=20)
+        self.online_back_button = Button("Back", center_x, 650, 300, 50, lambda: self.set_state("MENU"), color=GRAY, font_size=20)
 
     def set_state(self, new_state):
         self.state = new_state
@@ -287,7 +287,7 @@ class SplendorApp:
             return
 
         self.network = Network()
-        welcome = self.network.connect(ip, port)
+        welcome = self.network.connect(ip, port, name)
         
         if welcome:
             print(f"Connected! Server says: {welcome}")

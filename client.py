@@ -7,14 +7,16 @@ class Network:
         self.port = 0
         self.addr = ()
 
-    def connect(self, host, port):
+    def connect(self, host, port, name):
         self.host = host
         self.port = port
         self.addr = (self.host, self.port)
         try:
             self.client.connect(self.addr)
-            # Receive the welcome message from the server
-            return self.client.recv(2048).decode('utf-8')
+            # Handshake: Send name first
+            self.client.send(str.encode(name))
+            # Receive the welcome message containing assigned ID
+            return self.client.recv(4096).decode('utf-8')
         except Exception as e:
             print(f"Connection Error: {e}")
             return None
