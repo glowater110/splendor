@@ -1,6 +1,5 @@
 gymnasium==1.2.3
 numpy==2.4.1
-numpy==1.24.4
 pygame==2.6.1
 sb3_contrib==2.7.1
 stable_baselines3==2.7.1
