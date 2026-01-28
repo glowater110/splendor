@@ -5,3 +5,4 @@ pyinstaller
 sb3_contrib
 stable_baselines3
 tqdm
+
