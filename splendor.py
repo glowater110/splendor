@@ -37,7 +37,7 @@ GEM_COLORS = {
 }
 
 class Button:
-    def __init__(self, text, x, y, w, h, callback, color=GRAY, hover_color=HOVER_COLOR, font_size=30):
+    def __init__(self, text, x, y, w, h, callback, color=GRAY, hover_color=HOVER_COLOR, font_size=30, style="rect"):
         self.rect = pygame.Rect(x, y, w, h)
         self.text = text
         self.callback = callback
@@ -45,6 +45,7 @@ class Button:
         self.color = color
         self.hover_color = hover_color
         self.is_active = True
+        self.style = style # "rect" or "text"
 
     def draw(self, screen):
         if not self.is_active:
@@ -53,10 +54,15 @@ class Button:
             mouse_pos = pygame.mouse.get_pos()
             current_color = self.hover_color if self.rect.collidepoint(mouse_pos) else self.color
         
-        pygame.draw.rect(screen, current_color, self.rect, border_radius=10)
-        pygame.draw.rect(screen, BLACK, self.rect, 2, border_radius=10)
+        if self.style == "rect":
+            pygame.draw.rect(screen, current_color, self.rect, border_radius=10)
+            pygame.draw.rect(screen, BLACK, self.rect, 2, border_radius=10)
+            text_color = BLACK
+        else:
+            # Text only style
+            text_color = current_color
         
-        text_surf = self.font.render(self.text, True, BLACK)
+        text_surf = self.font.render(self.text, True, text_color)
         text_rect = text_surf.get_rect(center=self.rect.center)
         screen.blit(text_surf, text_rect)
 
@@ -67,13 +73,14 @@ class Button:
                     self.callback()
 
 class InputField:
-    def __init__(self, x, y, w, h, label="", initial_text=""):
+    def __init__(self, x, y, w, h, label="", initial_text="", password_mode=False):
         self.rect = pygame.Rect(x, y, w, h)
         self.label = label
         self.text = initial_text
         self.active = False
         self.font = pygame.font.SysFont('Verdana', 24)
         self.label_font = pygame.font.SysFont('Verdana', 18, bold=True)
+        self.password_mode = password_mode
 
     def handle_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN:
@@ -99,8 +106,40 @@ class InputField:
         pygame.draw.rect(screen, color, self.rect, 2)
         
         # Draw Text
-        text_surf = self.font.render(self.text, True, BLACK)
+        display_text = "*" * len(self.text) if self.password_mode else self.text
+        text_surf = self.font.render(display_text, True, BLACK)
         screen.blit(text_surf, (self.rect.x + 10, self.rect.y + 5))
+
+def deserialize_card(d):
+    if not d: return None
+    # Reconstruct Card object. Points, Gem(Enum), Cost
+    return Card(d["points"], Gem(d["gem"]), d["cost"])
+
+def update_game_from_state(game, state):
+    game.turn_count = state["turn"]
+    game.curr_player_idx = state["curr_player_idx"]
+    game.bank = state["bank"]
+    
+    # Board
+    game.board = {int(t): [deserialize_card(c) for c in cards] for t, cards in state["board"].items()}
+    
+    # Decks (Dummy fill)
+    if "decks_counts" in state:
+        for t, count in state["decks_counts"].items():
+            game.decks[int(t)] = [None] * count 
+    
+    # Nobles
+    from classdef import Tile
+    game.tiles = [Tile(t_cost) for t_cost in state["nobles"]]
+    
+    # Players
+    for i, p_data in enumerate(state["players"]):
+        if i >= len(game.players): break 
+        p = game.players[i]
+        p.name = p_data["name"]
+        p.tokens = p_data["tokens"]
+        p.cards = [deserialize_card(c) for c in p_data["cards"]]
+        p.keeped = [deserialize_card(c) for c in p_data["reserved"]]
 
 class SplendorApp:
     def __init__(self):
@@ -175,15 +214,75 @@ class SplendorApp:
         
         # Network Settings
         self.network = None
-        self.online_name_input = InputField(center_x, 250, 300, 50, label="Your Name (ID):", initial_text="Player1")
-        self.online_ip_input = InputField(center_x, 350, 300, 50, label="Server IP:", initial_text="0.tcp.jp.ngrok.io")
-        self.online_port_input = InputField(center_x, 450, 300, 50, label="Port:", initial_text="12047")
+        self.my_player_id = None
+        # self.online_name_input = InputField(center_x, 250, 300, 50, label="Your Name (ID):", initial_text="Player1")
+        self.online_ip_input = InputField(center_x, 250, 300, 50, label="Server IP:", initial_text="0.tcp.jp.ngrok.io")
+        self.online_port_input = InputField(center_x, 350, 300, 50, label="Port:")
         
-        self.online_connect_button = Button("Connect", center_x, 550, 300, 80, self.try_connect, color=GREEN, font_size=20)
-        self.online_back_button = Button("Back", center_x, 650, 300, 50, lambda: self.set_state("MENU"), color=GRAY, font_size=20)
+        self.online_connect_button = Button("CONNECT TO SERVER", center_x, 450, 300, 80, self.try_connect, color=GREEN, font_size=20)
+        
+        # Login/Register UI
+        self.login_id_input = InputField(center_x, 250, 300, 50, label="ID:")
+        self.login_pw_input = InputField(center_x, 350, 300, 50, label="Password:", password_mode=True)
+        self.btn_do_login = Button("LOGIN", center_x, 450, 140, 60, self.req_login, color=GREEN, font_size=20)
+        self.btn_do_register = Button("REGISTER", center_x + 160, 450, 140, 60, self.req_register, color=GRAY, font_size=20)
+        
+        # Lobby Variables
+        self.room_name_input = InputField(SCREEN_WIDTH - 350, 200, 300, 50, label="New Room Name:", initial_text="My Room")
+        
+        # Max Player Select Buttons
+        self.create_max_players = 4
+        self.btn_mp_2 = Button("2P", SCREEN_WIDTH - 350, 280, 90, 50, lambda: self.set_create_mp(2), color=GRAY)
+        self.btn_mp_3 = Button("3P", SCREEN_WIDTH - 245, 280, 90, 50, lambda: self.set_create_mp(3), color=GRAY)
+        self.btn_mp_4 = Button("4P", SCREEN_WIDTH - 140, 280, 90, 50, lambda: self.set_create_mp(4), color=GREEN) # Default
+        
+        self.btn_create_room = Button("CREATE ROOM", SCREEN_WIDTH - 350, 350, 300, 60, self.req_create_room, color=BLUE_RESERVE)
+        self.btn_refresh_rooms = Button("REFRESH", 50, 650, 200, 50, self.req_room_list, color=GRAY)
+        
+        self.lobby_rooms = [] # List of room dicts
+        self.room_join_buttons = []
+        self.last_room_fetch = 0
+        
+        self.is_host = False
+        self.am_i_ready = False
+        self.current_room_info = None
+        self.btn_leave_room = Button("LEAVE ROOM", 50, 650, 200, 50, self.req_leave_room, color=RED_ERROR)
+        self.btn_toggle_ready = Button("READY", 270, 650, 200, 50, self.req_toggle_ready, color=GRAY)
+        self.btn_close_room = Button("DESTROY ROOM", 490, 650, 200, 50, lambda: self.set_state("CONFIRM_DESTROY"), color=(139, 0, 0))
+        self.btn_start_online_game = Button("START GAME", SCREEN_WIDTH - 250, 650, 200, 50, self.check_start_game_condition, color=GRAY) # Disabled by default
+        
+        self.connection_msg = "" # Message from server or error status
+        self.server_time_str = "--:--:--" # For connection test
+        self.available_ai_models = ["Random Bot"] # Default list
+        self.network_buffer = ""
+        
+        # Global Back Button (Text Style)
+        self.btn_global_back = Button("< Back", 10, 10, 100, 40, self.go_back, color=BLACK, hover_color=GRAY, font_size=24, style="text")
+
+    def set_create_mp(self, num):
+        self.create_max_players = num
+        self.btn_mp_2.color = GREEN if num == 2 else GRAY
+        self.btn_mp_3.color = GREEN if num == 3 else GRAY
+        self.btn_mp_4.color = GREEN if num == 4 else GRAY
 
     def set_state(self, new_state):
         self.state = new_state
+        if new_state == "ONLINE_LOBBY":
+            self.req_room_list()
+
+    def go_back(self):
+        if self.state in ["ONLINE_CONNECT", "PLAYER_SELECT", "AI_VS_USER", "AI_VS_AI"]:
+            self.state = "MENU"
+            self.game = None
+        elif self.state == "ONLINE_LOGIN":
+            self.disconnect_network() # Goes back to MENU (via disconnect)
+            self.state = "ONLINE_CONNECT" # Override to CONNECT screen
+        elif self.state == "AI_SELECT":
+            self.state = "PLAYER_SELECT"
+        elif self.state == "ONLINE_LOBBY":
+            self.disconnect_network() # Goes to MENU
+        elif self.state in ["ONLINE_ROOM", "ONLINE_GAME"]:
+            self.req_leave_room() # Goes to ONLINE_LOBBY
 
     def scan_ai_models(self):
         self.ai_models = ["Random Bot"]
@@ -271,45 +370,47 @@ class SplendorApp:
             self.run_ai_turns_until_user()
 
     def start_online(self):
-        print("Switching to Online Connection screen...")
+        # print("Switching to Online Connection screen...")
         self.state = "ONLINE_CONNECT"
 
     def try_connect(self):
-        name = self.online_name_input.text.strip()
         ip = self.online_ip_input.text.strip()
+        self.connection_msg = "" 
         try:
             port = int(self.online_port_input.text.strip())
         except:
-            self.log_action("Invalid Port!")
-            return
-
-        if not name:
-            self.log_action("Name cannot be empty!")
+            self.connection_msg = "Error: Invalid Port!"
             return
 
         self.network = Network()
-        welcome_str = self.network.connect(ip, port, name)
+        # Initial connection (no handshake name needed now)
+        welcome_str = self.network.connect(ip, port)
         
         if welcome_str:
-            try:
-                data = json.loads(welcome_str)
-                if data.get("type") == "WELCOME":
-                    self.my_player_id = data.get("player_id")
-                    print(f"Connected! My ID: {self.my_player_id}")
-                    self.log_action(f"Connected as {self.my_player_id}")
-                    self.set_state("ONLINE_LOBBY")
-                else:
-                    self.log_action("Unexpected server response.")
-            except:
-                self.log_action("Failed to parse server greeting.")
+            # We don't care about welcome message content yet, server expects LOGIN
+            print("Connected to server. Moving to Login.")
+            self.state = "ONLINE_LOGIN"
         else:
-            self.log_action("Connection Failed!")
+            self.connection_msg = "Error: Connection Refused."
             self.network = None
+
+    def req_login(self):
+        uid = self.login_id_input.text.strip()
+        upw = self.login_pw_input.text.strip()
+        if not uid or not upw: return
+        msg = {"type": "LOGIN", "username": uid, "password": upw}
+        self.network.send(json.dumps(msg) + "\n")
+
+    def req_register(self):
+        uid = self.login_id_input.text.strip()
+        upw = self.login_pw_input.text.strip()
+        if not uid or not upw: return
+        msg = {"type": "REGISTER", "username": uid, "password": upw}
+        self.network.send(json.dumps(msg) + "\n")
 
     def clear_selected_tokens(self):
         self.pending_tokens = [0] * 6
-        self.confirm_button.is_active = False
-        self.cancel_button.is_active = False
+        self.validate_token_selection() # Force update button to SKIP state
         if self.player_action_state == "SELECTING_TOKENS":
             self.player_action_state = "IDLE"
 
@@ -330,31 +431,101 @@ class SplendorApp:
     def validate_token_selection(self):
         total_selected_count = sum(self.pending_tokens)
         
-        if total_selected_count > 0:
-            self.player_action_state = "SELECTING_TOKENS"
-            self.cancel_button.is_active = True
-        else:
+        # --- SKIP Logic ---
+        if total_selected_count == 0:
             self.player_action_state = "IDLE"
+            self.confirm_button.text = "Skip"
+            self.confirm_button.color = (255, 140, 0) # Orange/Yellow warning
+            self.confirm_button.is_active = True
             self.cancel_button.is_active = False
-            self.confirm_button.is_active = False
             return
 
-        is_valid = False
+        # --- Normal Selection Logic ---
+        self.player_action_state = "SELECTING_TOKENS"
+        self.confirm_button.text = "Confirm"
+        self.confirm_button.color = GREEN
+        self.cancel_button.is_active = True
+        self.confirm_button.is_active = False # Default to false until proven valid
+
+        # Rule 1: 2 Same Color
         if 2 in self.pending_tokens:
             if self.pending_tokens.count(2) == 1 and total_selected_count == 2:
                 gem_idx_of_two = self.pending_tokens.index(2)
                 if self.game.bank[gem_idx_of_two] >= 4:
-                    is_valid = True
-        elif total_selected_count == 3:
-            if self.pending_tokens.count(1) == 3:
-                is_valid = True
-        
-        self.confirm_button.is_active = is_valid
+                    self.confirm_button.is_active = True
+            return # If you have a 2, you can't have anything else
+
+        # Rule 2: 3 Different Colors (Standard)
+        # Rule 3: < 3 Different Colors (If bank is depleted)
+        if total_selected_count <= 3:
+            # Check if all selected are 1 (distinct)
+            if all(x <= 1 for x in self.pending_tokens):
+                # Count how many distinct colors are available in the BANK
+                available_colors_in_bank = sum(1 for x in self.game.bank[:5] if x > 0)
+                
+                # If we selected 3 distinct, it's valid.
+                if total_selected_count == 3:
+                    self.confirm_button.is_active = True
+                
+                # If we selected < 3, it's ONLY valid if we couldn't take more
+                elif total_selected_count < 3:
+                    # Logic: We took X tokens. Valid if X == available_colors_in_bank
+                    # OR if we simply decided to take fewer? 
+                    # Standard rule: "Player can take 3 distinct gems". It implies you *can* take fewer if you want?
+                    # Actually, usually you must take 3 if available. But if only 2 types left, take 2.
+                    # Let's allow taking N tokens if N == min(3, available_colors_in_bank)
+                    
+                    max_possible = min(3, available_colors_in_bank)
+                    if total_selected_count == max_possible:
+                        self.confirm_button.is_active = True
+                    # Also allow if user just wants fewer? Some house rules allow it. 
+                    # Let's stick to: Valid if total == max_possible.
+                    
+                    # BUT: What if user selects Blue+Green (2), but Red is also available?
+                    # Strict rules say you must take Red too.
+                    # Relaxed rules say okay.
+                    # Let's Implement: Valid if total_selected == min(3, distinct_types_selected + available_unselected_types)
+                    # Actually simpler: If total_selected == 3, good.
+                    # If total_selected < 3, check if we *could* have taken more distinct ones.
+                    
+                    # Implementation for "Strict but Fair":
+                    # You can take N distinct tokens only if you literally cannot take N+1 distinct tokens (because bank is empty or you hit 3).
+                    
+                    # Actually, to make it user friendly as requested: "user cannot take only less than 3 tokens ... even if there are only one or two kinds of token left."
+                    # This implies the user SHOULD be allowed to take what is available.
+                    
+                    if total_selected_count == available_colors_in_bank:
+                         self.confirm_button.is_active = True
+                    elif total_selected_count < available_colors_in_bank and total_selected_count < 3:
+                        # User took 2, but 3 were available. Strict rule says NO.
+                        # User request says: "I want to make this possible to choose... even if there are only one or two kinds left"
+                        # Wait, the prompt said: "now user CANNOT take... I want to make this POSSIBLE"
+                        # So I should allow it.
+                        self.confirm_button.is_active = True
+
+    def req_game_action(self, action):
+        # print(f"DEBUG: Sending GAME_ACTION: {action}")
+        msg = {"type": "GAME_ACTION", "action": action}
+        payload = json.dumps(msg) + "\n"
+        self.network.send(payload)
+        # We don't update local game immediately; wait for server update
+        self.player_action_state = "IDLE"
+        self.clear_selected_tokens()
 
     def execute_token_action(self):
         if not self.confirm_button.is_active: return
 
+        # Handle Skip
+        if self.confirm_button.text == "Skip":
+            self.state = "CONFIRM_SKIP" # Transition to warning state
+            return
+
         action = {'type': 'get_token', 'tokens': self.pending_tokens[:]}
+        
+        if self.state == "ONLINE_GAME":
+            self.req_game_action(action)
+            return
+
         self.log_action(f"Player {self.game.get_curr_player().name} took tokens: {self.pending_tokens}")
         
         try:
@@ -370,25 +541,152 @@ class SplendorApp:
     def req_create_room(self):
         name = self.room_name_input.text.strip()
         if not name: return
-        msg = {"type": "CREATE_ROOM", "name": name, "max_players": 4}
-        self.network.send(json.dumps(msg))
+        msg = {"type": "CREATE_ROOM", "name": name, "max_players": self.create_max_players}
+        self.network.send(json.dumps(msg) + "\n")
 
-    def req_join_room(self, room_id):
-        msg = {"type": "JOIN_ROOM", "room_id": room_id}
-        self.network.send(json.dumps(msg))
+    def req_join_room(self, rid):
+        msg = {"type": "JOIN_ROOM", "room_id": rid}
+        self.network.send(json.dumps(msg) + "\n")
+
+    def req_toggle_ready(self):
+        msg = {"type": "TOGGLE_READY"}
+        self.network.send(json.dumps(msg) + "\n")
+
+    def req_update_bot(self, seat_idx, current_model):
+        # print(f"DEBUG: req_update_bot called for seat {seat_idx}, curr={current_model}")
+        # print(f"DEBUG: Available models: {self.available_ai_models}")
+        
+        # Cycle to next model
+        if not self.available_ai_models: return
+        
+        try:
+            curr_idx = self.available_ai_models.index(current_model)
+            next_idx = (curr_idx + 1) % len(self.available_ai_models)
+        except ValueError:
+            next_idx = 0
+            
+        new_model = self.available_ai_models[next_idx]
+        # print(f"DEBUG: Requesting change to {new_model}")
+        
+        msg = {
+            "type": "UPDATE_BOT_SETTINGS",
+            "seat_idx": seat_idx,
+            "model": new_model
+        }
+        self.network.send(json.dumps(msg) + "\n")
 
     def req_leave_room(self):
         msg = {"type": "LEAVE_ROOM"}
-        self.network.send(json.dumps(msg))
+        self.network.send(json.dumps(msg) + "\n")
         self.set_state("ONLINE_LOBBY")
         self.current_room_info = None
 
+    def req_close_room(self):
+        # print("DEBUG: req_close_room called")
+        msg = {"type": "CLOSE_ROOM"}
+        self.network.send(json.dumps(msg) + "\n")
+        # Wait for server ROOM_CLOSED message to transition
+
     def req_room_list(self):
         msg = {"type": "GET_ROOMS"}
-        self.network.send(json.dumps(msg))
+        self.network.send(json.dumps(msg) + "\n")
+
+    def check_start_game_condition(self):
+        # print("DEBUG: check_start_game_condition called")
+        # Check if room is full
+        r = self.current_room_info
+        connected_count = len(r.get("players", [])) # Assuming players list has connected IDs
+        # print(f"DEBUG: connected={connected_count}, max={r['max_players']}")
+        
+        if connected_count < r['max_players']:
+            # print("DEBUG: Opening Bot Popup")
+            # Need to configure bots
+            self.init_bot_selection_popup(connected_count, r['max_players'])
+        else:
+            # print("DEBUG: Starting immediately")
+            # Full room, start immediately
+            self.req_start_game()
+
+    def init_bot_selection_popup(self, current_count, max_players):
+        # print("DEBUG: Init Bot Popup")
+        self.bot_select_buttons = []
+        self.bot_settings_local = {} # seat_idx -> model_name
+        
+        start_y = SCREEN_WIDTH // 2 - 100 # Using X center for Y? Typo in thought, let's fix coords
+        center_x = SCREEN_WIDTH // 2 - 200
+        start_y = 200
+        
+        # Identify empty seats
+        # Seat indices 0..current_count-1 are humans.
+        # Bots are current_count..max_players-1.
+        
+        for i in range(current_count, max_players):
+            # Default model
+            self.bot_settings_local[i] = "Random Bot"
+            
+            btn = Button(f"Seat {i+1}: Random Bot", center_x, start_y, 400, 60, lambda idx=i: self.cycle_local_bot_model(idx))
+            self.bot_select_buttons.append(btn)
+            start_y += 80
+            
+        self.btn_confirm_bots = Button("CONFIRM & START", center_x, start_y + 20, 400, 60, self.confirm_bot_selection_and_start, color=GREEN)
+        self.btn_cancel_bots = Button("CANCEL", center_x, start_y + 100, 400, 60, lambda: self.set_state("ONLINE_ROOM"), color=RED_ERROR)
+        
+        self.state = "BOT_SELECT_POPUP"
+
+    def cycle_local_bot_model(self, seat_idx):
+        # print(f"DEBUG: Cycling bot for seat {seat_idx}")
+        # print(f"DEBUG: Available models: {self.available_ai_models}")
+        
+        if not self.available_ai_models: return
+        
+        current = self.bot_settings_local.get(seat_idx, "Random Bot")
+        try:
+            curr_idx = self.available_ai_models.index(current)
+            next_idx = (curr_idx + 1) % len(self.available_ai_models)
+        except:
+            next_idx = 0
+            
+        new_model = self.available_ai_models[next_idx]
+        self.bot_settings_local[seat_idx] = new_model
+        # print(f"DEBUG: New model: {new_model}")
+        
+        # Update button text
+        target_prefix = f"Seat {seat_idx+1}:"
+        for btn in self.bot_select_buttons:
+            if btn.text.startswith(target_prefix):
+                btn.text = f"Seat {seat_idx+1}: {new_model}"
+                break
+
+    def confirm_bot_selection_and_start(self):
+        # Send updates for all bots
+        for seat_idx, model in self.bot_settings_local.items():
+            msg = {
+                "type": "UPDATE_BOT_SETTINGS",
+                "seat_idx": seat_idx,
+                "model": model
+            }
+            self.network.send(json.dumps(msg) + "\n")
+            # We don't wait for response, assuming reliable TCP order
+            
+        # Then start
+        self.req_start_game()
+
+    def draw_bot_select_popup(self):
+        self.draw_online_room() # Background
+        s = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA); s.fill((0,0,0,200)); self.screen.blit(s, (0,0))
+        
+        title = self.font_xl.render("Configure Bots", True, WHITE)
+        self.screen.blit(title, (SCREEN_WIDTH//2 - 150, 100))
+        
+        for btn in self.bot_select_buttons:
+            btn.draw(self.screen)
+            
+        self.btn_confirm_bots.draw(self.screen)
+        self.btn_cancel_bots.draw(self.screen)
 
     def req_start_game(self):
-        pass # To be implemented
+        msg = {"type": "START_GAME"}
+        self.network.send(json.dumps(msg) + "\n")
 
     def handle_network_messages(self):
         if not self.network: return
@@ -397,62 +695,122 @@ class SplendorApp:
             raw_data = self.network.receive()
             if not raw_data: return
             
-            # The server might send multiple JSON objects stuck together or in fragments.
-            # Ideally, we should buffer. For this simple case, we assume one packet = one JSON 
-            # OR simple splitting if the server sends "}{".
-            # For robustness, let's just try to parse the whole string.
+            self.network_buffer += raw_data
             
-            # Simple hack for multiple json messages:
-            raw_data = raw_data.replace('}{', '}|{')
-            messages = raw_data.split('|')
-            
-            for msg_str in messages:
-                data = json.loads(msg_str)
-                msg_type = data.get("type")
+            while "\n" in self.network_buffer:
+                msg_str, self.network_buffer = self.network_buffer.split("\n", 1)
+                if not msg_str.strip(): continue
                 
-                if msg_type == "ROOM_LIST":
-                    self.lobby_rooms = data.get("rooms", [])
-                    self.update_room_buttons()
+                try:
+                    data = json.loads(msg_str)
+                    # print(f"DEBUG: Full Packet: {data}") 
+                    msg_type = data.get("type")
+                    # print(f"DEBUG: Client received {msg_type}")
                     
-                elif msg_type == "ROOM_CREATED":
-                    # I created a room, so I join it automatically
-                    self.current_room_info = data.get("room")
-                    self.is_host = (self.current_room_info["host"] == self.my_player_id)
-                    self.set_state("ONLINE_ROOM")
-                    
-                elif msg_type == "JOINED_ROOM":
-                    # I joined a room
-                    self.current_room_info = data.get("room")
-                    self.is_host = (self.current_room_info["host"] == self.my_player_id)
-                    self.set_state("ONLINE_ROOM")
-                    
-                elif msg_type == "PLAYER_JOINED":
-                    # Someone else joined my room
-                    if self.state == "ONLINE_ROOM":
-                        self.current_room_info = data.get("room")
-                        p_id = data.get("player_id")
-                        self.log_action(f"{p_id} joined the room.")
-
-                elif msg_type == "PLAYER_LEFT":
-                    if self.state == "ONLINE_ROOM":
-                        self.current_room_info = data.get("room")
-                        p_id = data.get("player_id")
-                        self.log_action(f"{p_id} left the room.")
+                    if msg_type == "ROOM_LIST":
+                        self.lobby_rooms = data.get("rooms", [])
+                        self.update_room_buttons()
                         
-                elif msg_type == "HOST_CHANGED":
-                    new_host = data.get("new_host")
-                    if self.state == "ONLINE_ROOM":
-                        self.current_room_info["host"] = new_host
-                        self.is_host = (new_host == self.my_player_id)
-                        self.log_action(f"Host changed to {new_host}")
+                    elif msg_type == "LOGIN_SUCCESS":
+                        self.my_player_id = data.get("player_id")
+                        self.connection_msg = data.get("message", "Logged in!")
+                        if "ai_models" in data:
+                            self.available_ai_models = data["ai_models"]
+                        print(f"Logged in! ID: {self.my_player_id}")
+                        self.set_state("ONLINE_LOBBY")
+                        
+                    elif msg_type == "REGISTER_SUCCESS":
+                        self.connection_msg = "Success: " + data.get("message", "Registered!")
+                        
+                    elif msg_type == "ROOM_CREATED":
+                        # I created a room, so I join it automatically
+                        self.current_room_info = data.get("room")
+                        self.is_host = (self.current_room_info["host"] == self.my_player_id)
+                        self.am_i_ready = False
+                        self.set_state("ONLINE_ROOM")
+                        
+                    elif msg_type == "JOINED_ROOM":
+                        # I joined a room
+                        self.current_room_info = data.get("room")
+                        self.is_host = (self.current_room_info["host"] == self.my_player_id)
+                        self.am_i_ready = False
+                        self.set_state("ONLINE_ROOM")
+                        
+                    elif msg_type in ["PLAYER_JOINED", "PLAYER_LEFT", "ROOM_UPDATE"]:
+                        if self.state == "ONLINE_ROOM":
+                            self.current_room_info = data.get("room")
+                            # Check local ready state consistency just in case
+                            for p in self.current_room_info["player_details"]:
+                                if p["id"] == self.my_player_id:
+                                    self.am_i_ready = p["ready"]
+                                    break
+                            
+                    elif msg_type == "READY_TOGGLED":
+                        self.am_i_ready = data.get("state")
 
-                elif msg_type == "ERROR":
-                    self.log_action(f"Server Error: {data.get('message')}")
+                    elif msg_type == "HOST_CHANGED":
+                        new_host = data.get("new_host")
+                        if self.state == "ONLINE_ROOM":
+                            self.current_room_info["host"] = new_host
+                            self.is_host = (new_host == self.my_player_id)
+                            self.log_action(f"Host changed to {new_host}")
 
-        except json.JSONDecodeError:
-            print("JSON Error in network msg")
+                    elif msg_type == "ROOM_CLOSED":
+                        self.log_action(data.get("message", "Room closed."))
+                        self.current_room_info = None
+                        self.is_host = False
+                        self.set_state("ONLINE_LOBBY")
+
+                    elif msg_type == "GAME_STARTED":
+                        self.log_action("Game is starting!")
+                        self.game_log = [] # Clear previous log
+                        self.set_state("ONLINE_GAME")
+                        # Init local dummy game to hold state
+                        if self.current_room_info:
+                            self.game = Game(p_count=self.current_room_info["max_players"])
+                        
+                        self.init_token_buttons() # Initialize UI buttons for tokens
+
+                    elif msg_type == "GAME_LOG":
+                        self.log_action(data.get("message", ""))
+
+                    elif msg_type == "GAME_OVER":
+                        # print(f"DEBUG: GAME_OVER packet: {data}")
+                        self.online_winner_name = data.get("winner", "Unknown")
+                        self.log_action(f"Game Over! Winner: {self.online_winner_name}")
+                        self.state = "GAME_OVER"
+
+                    elif msg_type == "GAME_STATE_UPDATE":
+                        if not self.game:
+                            # Should have been created in GAME_STARTED, but safe fallback
+                            # We guess max players from player list len if not avail?
+                            p_len = len(data.get("state")["players"])
+                            self.game = Game(p_count=p_len)
+                        
+                        update_game_from_state(self.game, data.get("state"))
+                        
+                        # Mapping logic if sent
+                        if "your_seat_mapping" in data:
+                            mapping = data["your_seat_mapping"]
+                            # Key is string in JSON, convert to my_player_id
+                            # But wait, my_player_id IS string.
+                            if self.my_player_id in mapping:
+                                self.user_player_idx = mapping[self.my_player_id]
+                                # print(f"My Seat: {self.user_player_idx}")
+
+                    elif msg_type == "ERROR":
+                        self.log_action(f"Server Error: {data.get('message')}")
+                        
+                    elif msg_type == "TIME_UPDATE":
+                        self.server_time_str = data.get("time")
+                        
+                except json.JSONDecodeError:
+                    print(f"JSON Error in packet: {msg_str}")
+
         except Exception as e:
             print(f"Net Handle Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def update_room_buttons(self):
         self.room_join_buttons = []
@@ -610,7 +968,15 @@ class SplendorApp:
             deck_x = self.popup_rect.centerx - 40
             deck_y = self.popup_rect.top + 30
             deck_rect = pygame.Rect(deck_x, deck_y, 80, 110)
-            color = (100, 50 + self.selected_card_tier*30, 50)
+            
+            # Tier Colors
+            if self.selected_card_tier == 1:
+                color = (0, 150, 0) # Green
+            elif self.selected_card_tier == 2:
+                color = (200, 200, 0) # Yellow
+            else:
+                color = (0, 70, 200) # Blue
+            
             pygame.draw.rect(self.screen, color, deck_rect, border_radius=5)
             pygame.draw.rect(self.screen, BLACK, deck_rect, 2, border_radius=5)
             text = self.font_m.render("?", True, WHITE)
@@ -650,6 +1016,7 @@ class SplendorApp:
 
     def draw_game_board(self):
         self.screen.fill((50, 150, 50)) 
+        
         if not self.game: return
 
         # ... (Nobles, Cards, Bank drawing logic remains same) ...
@@ -696,7 +1063,7 @@ class SplendorApp:
             
             self.draw_text_with_outline(str(gem_val), self.font_l, bank_x, current_y, WHITE, BLACK, 2)
             
-            if i < 5 and self.state == "AI_VS_USER" and self.game.curr_player_idx == self.user_player_idx and self.player_action_state != "DISCARDING_TOKENS":
+            if i < 5 and self.state in ["AI_VS_USER", "ONLINE_GAME"] and self.game.curr_player_idx == self.user_player_idx and self.player_action_state != "DISCARDING_TOKENS":
                 plus, minus = self.token_buttons[i]
                 if plus and minus:
                     plus.draw(self.screen)
@@ -710,15 +1077,15 @@ class SplendorApp:
         curr_p = self.game.get_curr_player()
         user_p = self.game.players[self.user_player_idx]
         
-        # Bottom box shows USER info in AI_VS_USER, or CURRENT player in AI_VS_AI
-        display_p = user_p if self.state == "AI_VS_USER" else curr_p
+        # Bottom box shows USER info in AI_VS_USER/ONLINE_GAME, or CURRENT player in AI_VS_AI
+        display_p = user_p if self.state in ["AI_VS_USER", "ONLINE_GAME"] else curr_p
         
         player_box_x = 200 # Centered player info box
         # Increase height to fit discounts
         pygame.draw.rect(self.screen, (200, 200, 200), (player_box_x, 550, 600, 160), border_radius=10) 
         
         # User stats in bottom box
-        if self.state == "AI_VS_USER":
+        if self.state in ["AI_VS_USER", "ONLINE_GAME"]:
             name_text = f"{user_p.name} ({user_p.points()} pts)"
         else:
             name_text = f"{curr_p.name} ({curr_p.points()} pts)"
@@ -871,8 +1238,12 @@ class SplendorApp:
     def draw_game_over(self):
         self.screen.fill(WHITE)
         
-        winner = self.game.check_winner()
-        winner_name = winner.name if winner else "Unknown"
+        winner_name = "Unknown"
+        if self.online_winner_name:
+            winner_name = self.online_winner_name
+        else:
+            winner = self.game.check_winner()
+            winner_name = winner.name if winner else "Unknown"
         
         title_surf = self.font_xl.render("GAME OVER", True, BLACK)
         title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 - 50))
@@ -882,9 +1253,100 @@ class SplendorApp:
         winner_rect = winner_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 + 20))
         self.screen.blit(winner_surf, winner_rect)
         
-        msg_surf = self.font_m.render("Press any key to return to Menu", True, DARK_GRAY)
-        msg_rect = msg_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 + 80))
-        self.screen.blit(msg_surf, msg_rect)
+        # Button
+        btn = Button("Return to Menu", SCREEN_WIDTH//2 - 150, SCREEN_HEIGHT//2 + 80, 300, 60, self.return_to_menu, color=GRAY)
+        btn.draw(self.screen)
+        self.game_over_button = btn
+
+    def return_to_menu(self):
+        if self.network and self.current_room_info:
+            # Online Mode: Return to Lobby (Leave Room)
+            self.req_leave_room()
+        else:
+            # Local Mode
+            self.state = "MENU"
+            self.game = None
+        self.clear_selected_tokens()
+
+    def draw_confirm_skip(self):
+        # Draw game board in background (dimmed)
+        if self.state == "ONLINE_GAME":
+            self.draw_online_game()
+        else:
+            self.draw_game_board()
+        
+        # Dimming
+        s = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        s.fill((0,0,0,150))
+        self.screen.blit(s, (0,0))
+        
+        # Popup Box - Centered in GAME BOARD (Screen - Log Width)
+        log_width = 280
+        effective_center_x = (SCREEN_WIDTH - log_width) // 2
+        
+        rect = pygame.Rect(effective_center_x - 200, SCREEN_HEIGHT//2 - 100, 400, 200)
+        pygame.draw.rect(self.screen, WHITE, rect, border_radius=10)
+        pygame.draw.rect(self.screen, BLACK, rect, 3, border_radius=10)
+        
+        # Text
+        msg = self.font_l.render("Skip Turn?", True, BLACK)
+        msg_rect = msg.get_rect(center=(rect.centerx, rect.top + 50))
+        self.screen.blit(msg, msg_rect)
+        
+        sub_msg = self.font_s.render("You will gain nothing this turn.", True, DARK_GRAY)
+        sub_rect = sub_msg.get_rect(center=(rect.centerx, rect.top + 80))
+        self.screen.blit(sub_msg, sub_rect)
+        
+        # Buttons
+        btn_yes = Button("YES (Skip)", rect.x + 30, rect.bottom - 70, 150, 50, self.do_skip_turn, color=RED_ERROR, font_size=20)
+        btn_no = Button("NO (Cancel)", rect.right - 180, rect.bottom - 70, 150, 50, self.cancel_skip_turn, color=GRAY, font_size=20)
+        
+        btn_yes.draw(self.screen)
+        btn_no.draw(self.screen)
+        
+        self.skip_yes_btn = btn_yes
+        self.skip_no_btn = btn_no
+
+    def do_skip_turn(self):
+        action = {'type': 'do_nothing'}
+        
+        if self.network and self.current_room_info:
+            # Online Mode
+            self.state = "ONLINE_GAME"
+            self.req_game_action(action)
+            return
+
+        self.log_action(f"Player {self.game.get_curr_player().name} skipped turn.")
+        self.game.step(action)
+        self.player_action_state = "IDLE"
+        self.state = "AI_VS_USER" 
+        self.clear_selected_tokens()
+        self.end_turn()
+
+    def cancel_skip_turn(self):
+        if self.network and self.current_room_info:
+            self.state = "ONLINE_GAME"
+        else:
+            self.state = "AI_VS_USER"
+
+    def draw_confirm_destroy(self):
+        # Background
+        self.draw_online_room()
+        s = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA); s.fill((0,0,0,150)); self.screen.blit(s, (0,0))
+        
+        # Center on WHOLE SCREEN
+        rect = pygame.Rect(SCREEN_WIDTH//2 - 200, SCREEN_HEIGHT//2 - 100, 400, 200)
+        pygame.draw.rect(self.screen, WHITE, rect, border_radius=10)
+        pygame.draw.rect(self.screen, BLACK, rect, 3, border_radius=10)
+        
+        self.screen.blit(self.font_l.render("Destroy Room?", True, BLACK), (rect.centerx-100, rect.top+30))
+        self.screen.blit(self.font_s.render("All players will be kicked.", True, RED_ERROR), (rect.centerx-100, rect.top+80))
+        
+        self.destroy_yes_btn = Button("YES", rect.x+30, rect.bottom-70, 150, 50, self.req_close_room, color=RED_ERROR)
+        self.destroy_no_btn = Button("NO", rect.right-180, rect.bottom-70, 150, 50, lambda: self.set_state("ONLINE_ROOM"), color=GRAY)
+        
+        self.destroy_yes_btn.draw(self.screen)
+        self.destroy_no_btn.draw(self.screen)
 
     def draw_menu(self):
         self.screen.fill(WHITE)
@@ -896,27 +1358,59 @@ class SplendorApp:
 
     def draw_online_connect(self):
         self.screen.fill(WHITE)
+        self.btn_global_back.draw(self.screen) # Back Button
+        
         title_surf = self.font_l.render("Online Connection", True, BLACK)
         title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 100))
         self.screen.blit(title_surf, title_rect)
         
-        self.online_name_input.draw(self.screen)
+        # self.online_name_input.draw(self.screen)
         self.online_ip_input.draw(self.screen)
         self.online_port_input.draw(self.screen)
         self.online_connect_button.draw(self.screen)
-        self.online_back_button.draw(self.screen)
+        # self.online_back_button.draw(self.screen)
         
-        # Show recent log at bottom
-        if self.game_log:
-            log_text = self.game_log[-1]
-            log_surf = self.font_m.render(log_text, True, RED_ERROR)
-            log_rect = log_surf.get_rect(center=(SCREEN_WIDTH//2, 520))
+        # Show Error message prominently
+        if self.connection_msg:
+            color = RED_ERROR if self.connection_msg.startswith("Error") else GREEN
+            log_surf = self.font_m.render(self.connection_msg, True, color)
+            log_rect = log_surf.get_rect(center=(SCREEN_WIDTH//2, 550))
+            self.screen.blit(log_surf, log_rect)
+
+    def draw_online_login(self):
+        self.screen.fill(WHITE)
+        self.btn_global_back.draw(self.screen)
+        
+        title_surf = self.font_l.render("Authentication", True, BLACK)
+        title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 100))
+        self.screen.blit(title_surf, title_rect)
+        
+        self.login_id_input.draw(self.screen)
+        self.login_pw_input.draw(self.screen)
+        self.btn_do_login.draw(self.screen)
+        self.btn_do_register.draw(self.screen)
+        
+        if self.connection_msg:
+            color = RED_ERROR if self.connection_msg.startswith("Error") else GREEN
+            log_surf = self.font_m.render(self.connection_msg, True, color)
+            log_rect = log_surf.get_rect(center=(SCREEN_WIDTH//2, 550))
             self.screen.blit(log_surf, log_rect)
 
     def draw_online_lobby(self):
         self.screen.fill(WHITE)
+        self.btn_global_back.draw(self.screen)
+        
         title_surf = self.font_l.render(f"Lobby - ID: {self.my_player_id}", True, BLACK)
-        self.screen.blit(title_surf, (50, 30))
+        self.screen.blit(title_surf, (150, 30)) # Shifted right
+        
+        # Connection Test (Time)
+        time_surf = self.font_m.render(f"Server Time: {self.server_time_str}", True, BLUE_RESERVE)
+        self.screen.blit(time_surf, (SCREEN_WIDTH - 250, 30))
+        
+        # Show Success Message from Server
+        if self.connection_msg and not self.connection_msg.startswith("Error"):
+            msg_surf = self.font_m.render(self.connection_msg, True, GREEN)
+            self.screen.blit(msg_surf, (50, 70))
         
         # Room List Area
         pygame.draw.rect(self.screen, (240, 240, 240), (40, 100, 420, 530))
@@ -937,15 +1431,23 @@ class SplendorApp:
         self.screen.blit(lbl, (SCREEN_WIDTH - 350, 120))
         
         self.room_name_input.draw(self.screen)
+        
+        # Max Player Buttons
+        self.btn_mp_2.draw(self.screen)
+        self.btn_mp_3.draw(self.screen)
+        self.btn_mp_4.draw(self.screen)
+        
         self.btn_create_room.draw(self.screen)
         self.btn_refresh_rooms.draw(self.screen)
         
-        back_btn = Button("DISCONNECT", SCREEN_WIDTH - 250, 650, 200, 50, self.disconnect_network, color=RED_ERROR)
+        back_btn = Button("Disconnect", SCREEN_WIDTH - 250, 650, 200, 50, self.disconnect_network, color=RED_ERROR)
         back_btn.draw(self.screen)
         self.temp_back_btn = back_btn 
 
     def draw_online_room(self):
         self.screen.fill(WHITE)
+        self.btn_global_back.draw(self.screen)
+        
         if not self.current_room_info: return
         
         r = self.current_room_info
@@ -956,17 +1458,80 @@ class SplendorApp:
         
         # Player List
         y = 200
-        for i, pid in enumerate(r['players']):
+        all_ready = True
+        self.bot_config_buttons = [] # Reset per frame for immediate mode check
+        
+        # Use player_details list for status
+        p_details = r.get("player_details", [])
+        
+        # Draw connected players and bots
+        for i, p_data in enumerate(p_details):
+            pid = p_data["id"]
+            name = p_data["name"]
+            is_ready = p_data["ready"]
+            is_bot = p_data.get("is_bot", False)
+            
+            if not is_ready: all_ready = False
+            
             role = "HOST" if pid == r['host'] else "PLAYER"
             color = GREEN if pid == self.my_player_id else BLACK
-            p_text = f"{i+1}. {pid} [{role}]"
-            p_surf = self.font_l.render(p_text, True, color)
-            self.screen.blit(p_surf, (SCREEN_WIDTH//2 - 150, y))
+            
+            status_text = "[READY]" if is_ready else "[WAITING]"
+            status_color = GREEN if is_ready else RED_ERROR
+            
+            # If it's a Bot and I am Host, allow configuration
+            if is_bot and self.is_host:
+                model_name = p_data.get("model", "Random Bot")
+                btn_txt = f"{name}: {model_name} (Click to Change)"
+                # Seat index is 'i' (0-based index in the player list... wait, player_details might be sparse? 
+                # No, to_dict fills it in order: humans then bots)
+                # Correct seat index is 'i'.
+                
+                # Draw button instead of text
+                btn = Button(btn_txt, SCREEN_WIDTH//2 - 200, y, 400, 40, lambda idx=i, m=model_name: self.req_update_bot(idx, m), color=GRAY, font_size=18)
+                btn.draw(self.screen)
+                self.bot_config_buttons.append(btn)
+            else:
+                # Normal Text Display
+                p_text = f"{i+1}. {name} [{role}]"
+                if is_bot: p_text += f" ({p_data.get('model', 'Random')})"
+                
+                p_surf = self.font_l.render(p_text, True, color)
+                self.screen.blit(p_surf, (SCREEN_WIDTH//2 - 200, y))
+                
+                s_surf = self.font_l.render(status_text, True, status_color)
+                self.screen.blit(s_surf, (SCREEN_WIDTH//2 + 100, y))
+            
             y += 50
             
         self.btn_leave_room.draw(self.screen)
+        
+        # Update Ready Button
+        self.btn_toggle_ready.text = "NOT READY" if self.am_i_ready else "READY?"
+        self.btn_toggle_ready.color = GREEN if self.am_i_ready else GRAY
+        self.btn_toggle_ready.draw(self.screen)
+        
         if self.is_host:
+            self.btn_close_room.draw(self.screen)
+            # Update Start Button
+            if all_ready:
+                self.btn_start_online_game.color = GREEN
+                self.btn_start_online_game.is_active = True
+            else:
+                self.btn_start_online_game.color = GRAY
+                self.btn_start_online_game.is_active = False
             self.btn_start_online_game.draw(self.screen)
+
+    def draw_online_game(self):
+        # Reuse local game board drawing
+        # But we need to ensure self.game is populated
+        if self.game:
+            self.draw_game_board()
+        else:
+            self.screen.fill(WHITE)
+            self.btn_global_back.draw(self.screen)
+            info = self.font_m.render("Waiting for game state...", True, DARK_GRAY)
+            self.screen.blit(info, (SCREEN_WIDTH//2 - 100, SCREEN_HEIGHT//2))
 
     def disconnect_network(self):
         if self.network:
@@ -1048,6 +1613,8 @@ class SplendorApp:
 
     def draw_ai_select(self):
         self.screen.fill(WHITE)
+        self.btn_global_back.draw(self.screen)
+        
         title_surf = self.font_xl.render("Configure AI Players", True, BLACK)
         title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 80))
         self.screen.blit(title_surf, title_rect)
@@ -1059,6 +1626,8 @@ class SplendorApp:
 
     def draw_player_select(self):
         self.screen.fill(WHITE)
+        self.btn_global_back.draw(self.screen)
+        
         title_surf = self.font_xl.render("Select Players", True, BLACK)
         title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 150))
         self.screen.blit(title_surf, title_rect)
@@ -1071,8 +1640,17 @@ class SplendorApp:
         current_player_idx = self.game.curr_player_idx
         
         # In AI vs AI, we allow clicks only for viewing cards
+        # In Online Game, allow input if it's my turn
         if self.state == "AI_VS_USER" and current_player_idx != self.user_player_idx:
             return
+        
+        if self.state == "ONLINE_GAME":
+            # Only allow if it's my turn
+            # print(f"DEBUG: Click. Curr: {current_player_idx}, Me: {self.user_player_idx}")
+            if current_player_idx != self.user_player_idx:
+                return
+            # else:
+            #     print("DEBUG: Click processed (My Turn)")
 
         if self.player_action_state == "SELECTING_CARD_ACTION":
             for btn in self.popup_buttons:
@@ -1080,12 +1658,12 @@ class SplendorApp:
             return 
 
         # Non-gameplay clicks (Confirm/Reset) only for User Turn
-        if self.state == "AI_VS_USER":
+        if self.state in ["AI_VS_USER", "ONLINE_GAME"]:
             self.confirm_button.check_click(pygame.event.Event(pygame.MOUSEBUTTONDOWN, {'button':1, 'pos':pos}))
             self.cancel_button.check_click(pygame.event.Event(pygame.MOUSEBUTTONDOWN, {'button':1, 'pos':pos}))
 
         if self.player_action_state in ["IDLE", "SELECTING_TOKENS"]:
-            if self.state == "AI_VS_USER":
+            if self.state in ["AI_VS_USER", "ONLINE_GAME"]:
                 for i in range(5): 
                     plus, minus = self.token_buttons[i]
                     if plus: plus.check_click(pygame.event.Event(pygame.MOUSEBUTTONDOWN, {'button':1, 'pos':pos}))
@@ -1100,6 +1678,11 @@ class SplendorApp:
                     dist = ((pos[0] - p_tok_x)**2 + (pos[1] - p_tok_y)**2)**0.5
                     if dist < 15: 
                         action = {'type': 'discard_token', 'gem_idx': i}
+                        if self.state == "ONLINE_GAME":
+                            self.req_game_action(action)
+                            self.player_action_state = "IDLE"
+                            return
+
                         self.log_action(f"Player {self.game.get_curr_player().name} discards {Gem(i).name}")
                         self.game.step(action)
                         if self.game.get_curr_player().token_count() <= 10:
@@ -1114,7 +1697,7 @@ class SplendorApp:
             start_y = 120
             for tier in [3, 2, 1]:
                 # Deck click (Only for User)
-                if self.state == "AI_VS_USER":
+                if self.state in ["AI_VS_USER", "ONLINE_GAME"]:
                     deck_x = start_x_cards_block - 100
                     deck_rect = pygame.Rect(deck_x, start_y, 80, 110)
                     if deck_rect.collidepoint(pos):
@@ -1126,7 +1709,7 @@ class SplendorApp:
                 for idx_in_board, card in enumerate(self.game.board[tier]):
                     card_rect = pygame.Rect(current_card_x, start_y, 80, 110)
                     if card_rect.collidepoint(pos):
-                        if self.state == "AI_VS_USER":
+                        if self.state in ["AI_VS_USER", "ONLINE_GAME"]:
                             self.open_card_popup(card, tier, idx_in_board)
                         else: # AI_VS_AI
                             self.open_view_only_popup(card)
@@ -1137,7 +1720,7 @@ class SplendorApp:
             # Reserved card click (Bottom box)
             for r_card_rect, card_obj, idx in self.reserved_card_rects:
                 if r_card_rect.collidepoint(pos):
-                    if self.state == "AI_VS_USER":
+                    if self.state in ["AI_VS_USER", "ONLINE_GAME"]:
                         self.open_reserved_card_popup(card_obj, idx)
                     else: # AI_VS_AI
                         self.open_view_only_popup(card_obj)
@@ -1166,12 +1749,12 @@ class SplendorApp:
         player = self.game.get_curr_player()
         can_reserve = player.can_reserve_card()
         
-        res_btn = Button(f"RESERVE Lv{tier}", self.popup_rect.centerx - 80, self.popup_rect.bottom - 80, 160, 50, 
-                         self.confirm_reserve_deck, color=BLUE_RESERVE if can_reserve else GRAY)
+        res_btn = Button(f"Reserve Lv{tier}", self.popup_rect.centerx - 80, self.popup_rect.bottom - 80, 160, 50, 
+                         self.confirm_reserve_deck, color=BLUE_RESERVE if can_reserve else GRAY, font_size=20)
         res_btn.is_active = can_reserve
         
-        cancel_btn = Button("CANCEL", self.popup_rect.right - 130, self.popup_rect.bottom - 80, 100, 50, 
-                            self.close_card_popup, color=RED_ERROR)
+        cancel_btn = Button("Cancel", self.popup_rect.right - 130, self.popup_rect.bottom - 80, 100, 50, 
+                            self.close_card_popup, color=RED_ERROR, font_size=20)
         
         self.popup_buttons = [res_btn, cancel_btn]
 
@@ -1180,8 +1763,14 @@ class SplendorApp:
         player = self.game.get_curr_player()
         
         if player.can_reserve_card():
+            action = {'type': 'reserve_deck', 'tier': tier}
+            
+            if self.state == "ONLINE_GAME":
+                self.req_game_action(action)
+                self.close_card_popup()
+                return
+
             try:
-                action = {'type': 'reserve_deck', 'tier': tier}
                 self.log_action(f"You reserved a hidden Level {tier} card.")
                 self.game.step(action)
                 self.close_card_popup()
@@ -1253,6 +1842,22 @@ class SplendorApp:
         player = self.game.get_curr_player()
         
         if player.can_buy(self.selected_card_obj):
+            if self.state == "ONLINE_GAME":
+                tier = self.selected_card_tier
+                try:
+                    slot = self.game.board[tier].index(self.selected_card_obj)
+                    action = {
+                        'type': 'buy_card_index',
+                        'tier': tier,
+                        'slot': slot
+                    }
+                    self.req_game_action(action)
+                    self.close_card_popup()
+                    return
+                except ValueError:
+                    print("Card not found in board list")
+                    return
+
             try:
                 action = {
                     'type': 'buy_card',
@@ -1263,9 +1868,6 @@ class SplendorApp:
                 self.game.step(action)
                 self.close_card_popup()
                 self.end_turn()
-            except ValueError:
-                self.log_action("Error: Card not found on board!")
-                self.close_card_popup() 
             except Exception as e:
                 self.log_action(f"Error buying card: {e}")
                 print(f"Error buying card: {e}")
@@ -1281,6 +1883,20 @@ class SplendorApp:
         player = self.game.get_curr_player()
 
         if player.can_reserve_card():
+            if self.state == "ONLINE_GAME":
+                tier = self.selected_card_tier
+                try:
+                    slot = self.game.board[tier].index(self.selected_card_obj)
+                    action = {
+                        'type': 'reserve_card_index',
+                        'tier': tier,
+                        'slot': slot
+                    }
+                    self.req_game_action(action)
+                    self.close_card_popup()
+                    return
+                except ValueError: return
+
             try:
                 action = {
                     'type': 'reserve_card',
@@ -1310,6 +1926,15 @@ class SplendorApp:
         reserved_card = player.keeped[self.selected_reserved_card_idx]
 
         if player.can_buy(reserved_card):
+            if self.state == "ONLINE_GAME":
+                action = {
+                    'type': 'buy_reserved_index',
+                    'reserved_idx': self.selected_reserved_card_idx
+                }
+                self.req_game_action(action)
+                self.close_card_popup()
+                return
+
             try:
                 action = {
                     'type': 'buy_reserved',
@@ -1353,8 +1978,11 @@ class SplendorApp:
 
     def end_turn(self):
         self.player_action_state = "IDLE"
+        # self.confirm_button.is_active = False # REMOVED: this was overriding validate_token_selection!
         self.clear_selected_tokens() 
-        self.confirm_button.is_active = False 
+        
+        if self.network and self.current_room_info:
+            return
 
         player = self.game.get_curr_player()
         if player.token_count() > 10:
@@ -1469,7 +2097,7 @@ class SplendorApp:
             running = True
             while running:
                 # Network Tick
-                if self.state in ["ONLINE_LOBBY", "ONLINE_ROOM", "ONLINE_GAME"]:
+                if self.state in ["ONLINE_LOGIN", "ONLINE_LOBBY", "ONLINE_ROOM", "ONLINE_GAME", "CONFIRM_DESTROY", "CONFIRM_SKIP", "BOT_SELECT_POPUP"]:
                     self.handle_network_messages()
                     # Auto refresh lobby
                     if self.state == "ONLINE_LOBBY":
@@ -1486,14 +2114,25 @@ class SplendorApp:
                             btn.check_click(event)
                     
                     elif self.state == "ONLINE_CONNECT":
-                        self.online_name_input.handle_event(event)
+                        self.btn_global_back.check_click(event)
+                        # self.online_name_input.handle_event(event)
                         self.online_ip_input.handle_event(event)
                         self.online_port_input.handle_event(event)
                         self.online_connect_button.check_click(event)
-                        self.online_back_button.check_click(event)
+                    
+                    elif self.state == "ONLINE_LOGIN":
+                        self.btn_global_back.check_click(event)
+                        self.login_id_input.handle_event(event)
+                        self.login_pw_input.handle_event(event)
+                        self.btn_do_login.check_click(event)
+                        self.btn_do_register.check_click(event)
                     
                     elif self.state == "ONLINE_LOBBY":
+                        self.btn_global_back.check_click(event)
                         self.room_name_input.handle_event(event)
+                        self.btn_mp_2.check_click(event)
+                        self.btn_mp_3.check_click(event)
+                        self.btn_mp_4.check_click(event)
                         self.btn_create_room.check_click(event)
                         self.btn_refresh_rooms.check_click(event)
                         if hasattr(self, 'temp_back_btn'):
@@ -1502,9 +2141,24 @@ class SplendorApp:
                             btn.check_click(event)
 
                     elif self.state == "ONLINE_ROOM":
+                        self.btn_global_back.check_click(event)
                         self.btn_leave_room.check_click(event)
+                        self.btn_toggle_ready.check_click(event) # Add Ready click
+                        
+                        # Bot Config Buttons (Dynamic)
+                        if hasattr(self, 'bot_config_buttons'):
+                            for btn in self.bot_config_buttons:
+                                btn.check_click(event)
+
                         if self.is_host:
+                            self.btn_close_room.check_click(event) # Add Close click
                             self.btn_start_online_game.check_click(event)
+
+                    elif self.state == "ONLINE_GAME":
+                        if event.type == pygame.MOUSEBUTTONDOWN:
+                            if event.button == 1:
+                                self.btn_global_back.check_click(event)
+                                self.handle_click(event.pos)
 
                     elif self.state == "AI_VS_USER":
                         if event.type == pygame.MOUSEBUTTONDOWN:
@@ -1516,17 +2170,35 @@ class SplendorApp:
                                 self.game = None
                                 self.clear_selected_tokens() 
                     
+                    elif self.state == "CONFIRM_SKIP":
+                        if hasattr(self, 'skip_yes_btn'):
+                            self.skip_yes_btn.check_click(event)
+                            self.skip_no_btn.check_click(event)
+
+                    elif self.state == "CONFIRM_DESTROY":
+                        if hasattr(self, 'destroy_yes_btn'):
+                            self.destroy_yes_btn.check_click(event)
+                            self.destroy_no_btn.check_click(event)
+
+                    elif self.state == "BOT_SELECT_POPUP":
+                        if hasattr(self, 'bot_select_buttons'):
+                            for btn in self.bot_select_buttons:
+                                btn.check_click(event)
+                            self.btn_confirm_bots.check_click(event)
+                            self.btn_cancel_bots.check_click(event)
+
                     elif self.state == "GAME_OVER":
-                        if event.type == pygame.KEYDOWN or event.type == pygame.MOUSEBUTTONDOWN:
-                            self.state = "MENU"
-                            self.game = None
-                            self.clear_selected_tokens()
+                        if event.type == pygame.MOUSEBUTTONDOWN:
+                            if hasattr(self, 'game_over_button'):
+                                self.game_over_button.check_click(event)
 
                     elif self.state == "PLAYER_SELECT":
+                        self.btn_global_back.check_click(event)
                         for btn in self.player_select_buttons:
                             btn.check_click(event)
 
                     elif self.state == "AI_SELECT":
+                        self.btn_global_back.check_click(event)
                         for btn in self.ai_config_buttons:
                             btn.check_click(event)
                         self.start_game_button.check_click(event)
@@ -1551,12 +2223,22 @@ class SplendorApp:
                     self.draw_menu()
                 elif self.state == "ONLINE_CONNECT":
                     self.draw_online_connect()
+                elif self.state == "ONLINE_LOGIN":
+                    self.draw_online_login()
                 elif self.state == "ONLINE_LOBBY":
                     self.draw_online_lobby()
                 elif self.state == "ONLINE_ROOM":
                     self.draw_online_room()
+                elif self.state == "ONLINE_GAME":
+                    self.draw_online_game()
                 elif self.state == "AI_VS_USER":
                     self.draw_game_board()
+                elif self.state == "CONFIRM_SKIP":
+                    self.draw_confirm_skip()
+                elif self.state == "CONFIRM_DESTROY":
+                    self.draw_confirm_destroy()
+                elif self.state == "BOT_SELECT_POPUP":
+                    self.draw_bot_select_popup()
                 elif self.state == "GAME_OVER":
                     self.draw_game_over()
                 elif self.state == "PLAYER_SELECT":
