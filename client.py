@@ -9,10 +9,21 @@ class Network:
 
     def connect(self, ip, port):
         try:
+            self.client.settimeout(2.0) 
             self.client.connect((ip, port))
-            return "Connected" # Dummy success message
+            
+            # Handshake Verification
+            data = self.client.recv(1024).decode('utf-8')
+            if "Splendor" in data: # Simple check
+                self.client.settimeout(None)
+                return "Connected"
+            else:
+                print("Invalid Server Handshake")
+                self.client.close()
+                return None
+                
         except socket.error as e:
-            print(e)
+            print(f"Connection Failed: {e}")
             return None
 
     def send(self, data):
@@ -30,12 +41,14 @@ class Network:
             # Set to non-blocking mode temporarily
             self.client.setblocking(0)
             data = self.client.recv(4096).decode('utf-8')
+            if not data: 
+                return "DISCONNECT" # Empty string means server closed connection
             return data
         except BlockingIOError:
             return None # No data available
         except Exception as e:
             # print(f"Receive Error: {e}")
-            return None
+            return "DISCONNECT" # Error means connection lost
 
     def disconnect(self):
         try:

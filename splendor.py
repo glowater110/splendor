@@ -5,8 +5,11 @@ import traceback
 import glob
 import os
 import json
+import re # Added for validation
+import numpy as np # Keep numpy for obs handling
 from itertools import combinations
-from sb3_contrib import MaskablePPO
+# from sb3_contrib import MaskablePPO # Removed
+from ai_lite import LiteModel # New lightweight engine
 from game import Game
 from classdef import Gem, Card, Player # Import Card for type hinting in UI
 from client import Network
@@ -136,6 +139,7 @@ def update_game_from_state(game, state):
     for i, p_data in enumerate(state["players"]):
         if i >= len(game.players): break 
         p = game.players[i]
+        # print(f"DEBUG: Sync Player {i} Name: {p.name} -> {p_data['name']}")
         p.name = p_data["name"]
         p.tokens = p_data["tokens"]
         p.cards = [deserialize_card(c) for c in p_data["cards"]]
@@ -146,6 +150,15 @@ class SplendorApp:
         pygame.init()
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         pygame.display.set_caption("Splendor Online")
+        
+        # Load and set App Icon
+        try:
+            icon = pygame.image.load('logo.png')
+            pygame.display.set_icon(icon)
+        except:
+            # print("Logo file not found, skipping icon set.")
+            pass
+
         self.clock = pygame.time.Clock()
         self.state = "MENU"
         
@@ -219,16 +232,16 @@ class SplendorApp:
         self.online_ip_input = InputField(center_x, 250, 300, 50, label="Server IP:", initial_text="0.tcp.jp.ngrok.io")
         self.online_port_input = InputField(center_x, 350, 300, 50, label="Port:")
         
-        self.online_connect_button = Button("CONNECT TO SERVER", center_x, 450, 300, 80, self.try_connect, color=GREEN, font_size=20)
+        self.online_connect_button = Button("Connect to Server", center_x, 450, 300, 80, self.try_connect, color=GREEN, font_size=20)
         
         # Login/Register UI
         self.login_id_input = InputField(center_x, 250, 300, 50, label="ID:")
         self.login_pw_input = InputField(center_x, 350, 300, 50, label="Password:", password_mode=True)
-        self.btn_do_login = Button("LOGIN", center_x, 450, 140, 60, self.req_login, color=GREEN, font_size=20)
-        self.btn_do_register = Button("REGISTER", center_x + 160, 450, 140, 60, self.req_register, color=GRAY, font_size=20)
+        self.btn_do_login = Button("Login", center_x, 450, 140, 60, self.req_login, color=GREEN, font_size=20)
+        self.btn_do_register = Button("Register", center_x + 160, 450, 140, 60, self.req_register, color=GRAY, font_size=20)
         
         # Lobby Variables
-        self.room_name_input = InputField(SCREEN_WIDTH - 350, 200, 300, 50, label="New Room Name:", initial_text="My Room")
+        self.room_name_input = InputField(SCREEN_WIDTH - 350, 200, 400, 50, label="New Room Name:", initial_text="My Room")
         
         # Max Player Select Buttons
         self.create_max_players = 4
@@ -236,8 +249,8 @@ class SplendorApp:
         self.btn_mp_3 = Button("3P", SCREEN_WIDTH - 245, 280, 90, 50, lambda: self.set_create_mp(3), color=GRAY)
         self.btn_mp_4 = Button("4P", SCREEN_WIDTH - 140, 280, 90, 50, lambda: self.set_create_mp(4), color=GREEN) # Default
         
-        self.btn_create_room = Button("CREATE ROOM", SCREEN_WIDTH - 350, 350, 300, 60, self.req_create_room, color=BLUE_RESERVE)
-        self.btn_refresh_rooms = Button("REFRESH", 50, 650, 200, 50, self.req_room_list, color=GRAY)
+        self.btn_create_room = Button("Create Room", SCREEN_WIDTH - 350, 350, 300, 60, self.req_create_room, color=BLUE_RESERVE)
+        self.btn_refresh_rooms = Button("Refresh", 50, 650, 200, 50, self.req_room_list, color=GRAY)
         
         self.lobby_rooms = [] # List of room dicts
         self.room_join_buttons = []
@@ -246,15 +259,22 @@ class SplendorApp:
         self.is_host = False
         self.am_i_ready = False
         self.current_room_info = None
-        self.btn_leave_room = Button("LEAVE ROOM", 50, 650, 200, 50, self.req_leave_room, color=RED_ERROR)
-        self.btn_toggle_ready = Button("READY", 270, 650, 200, 50, self.req_toggle_ready, color=GRAY)
-        self.btn_close_room = Button("DESTROY ROOM", 490, 650, 200, 50, lambda: self.set_state("CONFIRM_DESTROY"), color=(139, 0, 0))
-        self.btn_start_online_game = Button("START GAME", SCREEN_WIDTH - 250, 650, 200, 50, self.check_start_game_condition, color=GRAY) # Disabled by default
+        self.btn_leave_room = Button("Leave Room", 50, 650, 200, 50, self.req_leave_room, color=RED_ERROR)
+        self.btn_toggle_ready = Button("Ready", 270, 650, 200, 50, self.req_toggle_ready, color=GRAY)
+        self.btn_close_room = Button("Destroy Room", 490, 650, 200, 50, lambda: self.set_state("CONFIRM_DESTROY"), color=(139, 0, 0))
+        self.btn_start_online_game = Button("Start Game", SCREEN_WIDTH - 250, 650, 200, 50, self.check_start_game_condition, color=GRAY) # Disabled by default
         
         self.connection_msg = "" # Message from server or error status
         self.server_time_str = "--:--:--" # For connection test
         self.available_ai_models = ["Random Bot"] # Default list
         self.network_buffer = ""
+        self.winner_name = None 
+        self.is_observer = False 
+        
+        # Popup Variables
+        self.popup_text = ""
+        self.popup_next_state = "MENU"
+        self.btn_popup_ok = Button("OK", SCREEN_WIDTH//2 - 50, SCREEN_HEIGHT//2 + 50, 100, 50, self.confirm_popup, color=GREEN)
         
         # Global Back Button (Text Style)
         self.btn_global_back = Button("< Back", 10, 10, 100, 40, self.go_back, color=BLACK, hover_color=GRAY, font_size=24, style="text")
@@ -286,13 +306,57 @@ class SplendorApp:
 
     def scan_ai_models(self):
         self.ai_models = ["Random Bot"]
-        for file in glob.glob("models/*.zip"):
+        for file in glob.glob("models/*.npz"):
             self.ai_models.append(os.path.basename(file))
             
     def log_action(self, text):
         self.game_log.append(text)
-        if len(self.game_log) > 20:
+        if len(self.game_log) > 12:
             self.game_log.pop(0)
+
+    def format_action_log(self, name, action):
+        t = action['type']
+        colors = ["White", "Blue", "Green", "Red", "Black", "Gold"]
+        
+        if t == 'get_token':
+            tokens = action['tokens']
+            taken = []
+            for i, count in enumerate(tokens):
+                if count > 0:
+                    color_name = colors[i]
+                    if count == 2:
+                        taken.append(f"{color_name} x2")
+                    else:
+                        taken.append(color_name)
+            return f"{name}: +{', '.join(taken)}"
+        
+        if t == 'buy_card' or t == 'buy_card_index':
+            # Try to get card info if available
+            card = action.get('card')
+            info = ""
+            if card:
+                gem_name = colors[card.gem.value]
+                info = f" ({gem_name} {card.points}pts)"
+            return f"{name}: Bought Card{info}"
+            
+        if t == 'reserve_card' or t == 'reserve_card_index': 
+            return f"{name}: Reserved Card"
+            
+        if t == 'reserve_deck': 
+            tier = action.get('tier', '?')
+            return f"{name}: Reserved Deck Lv{tier}"
+            
+        if t == 'buy_reserved' or t == 'buy_reserved_index':
+            return f"{name}: Bought Reserved"
+            
+        if t == 'discard_token': 
+            color = colors[action['gem_idx']]
+            return f"{name}: Discarded {color}"
+            
+        if t == 'do_nothing':
+            return f"{name}: Skipped"
+            
+        return f"{name}: {t}"
 
     def init_token_buttons(self):
         self.token_buttons = []
@@ -316,10 +380,10 @@ class SplendorApp:
     def load_model_by_name(self, name):
         if name == "Random Bot": return None
         try:
-            print(f"Loading {name}...")
-            return MaskablePPO.load(f"models/{name}")
+            # print(f"Loading {name}...")
+            return LiteModel(f"models/{name}")
         except Exception as e:
-            print(f"Error loading {name}: {e}")
+            # print(f"Error loading {name}: {e}")
             return None
 
     def start_ai_vs_ai(self, p_count, models_list):
@@ -376,10 +440,18 @@ class SplendorApp:
     def try_connect(self):
         ip = self.online_ip_input.text.strip()
         self.connection_msg = "" 
+        
         try:
-            port = int(self.online_port_input.text.strip())
-        except:
-            self.connection_msg = "Error: Invalid Port!"
+            port_text = self.online_port_input.text.strip()
+            if not port_text:
+                self.connection_msg = "Error: Port is empty!"
+                return
+            port = int(port_text)
+            if not (0 <= port <= 65535):
+                self.connection_msg = "Error: Port range 0-65535!"
+                return
+        except ValueError:
+            self.connection_msg = "Error: Port must be numeric!"
             return
 
         self.network = Network()
@@ -394,10 +466,28 @@ class SplendorApp:
             self.connection_msg = "Error: Connection Refused."
             self.network = None
 
+    def validate_credentials(self, uid, upw):
+        # ID Rule: a-z, 0-9, _, -, . (Must be lowercase)
+        # Regex explanation: ^[a-z0-9_.-]+$ matches only allowed chars from start to end
+        if not re.match(r"^[a-z0-9_.-]+$", uid):
+            self.connection_msg = "Error: ID must be lowercase a-z, 0-9, _, -, ."
+            return False
+        if len(uid) < 4:
+            self.connection_msg = "Error: ID too short (min 4)"
+            return False
+        if len(upw) < 4:
+            self.connection_msg = "Error: PW too short (min 4)"
+            return False
+        return True
+
     def req_login(self):
         uid = self.login_id_input.text.strip()
         upw = self.login_pw_input.text.strip()
         if not uid or not upw: return
+        
+        if not self.validate_credentials(uid, upw):
+            return
+
         msg = {"type": "LOGIN", "username": uid, "password": upw}
         self.network.send(json.dumps(msg) + "\n")
 
@@ -405,6 +495,10 @@ class SplendorApp:
         uid = self.login_id_input.text.strip()
         upw = self.login_pw_input.text.strip()
         if not uid or not upw: return
+        
+        if not self.validate_credentials(uid, upw):
+            return
+
         msg = {"type": "REGISTER", "username": uid, "password": upw}
         self.network.send(json.dumps(msg) + "\n")
 
@@ -526,7 +620,9 @@ class SplendorApp:
             self.req_game_action(action)
             return
 
-        self.log_action(f"Player {self.game.get_curr_player().name} took tokens: {self.pending_tokens}")
+        # self.log_action(f"Player {self.game.get_curr_player().name} took tokens: {self.pending_tokens}")
+        msg = self.format_action_log(self.game.get_curr_player().name, action)
+        self.log_action(msg)
         
         try:
             self.game.step(action)
@@ -612,31 +708,25 @@ class SplendorApp:
         self.bot_select_buttons = []
         self.bot_settings_local = {} # seat_idx -> model_name
         
-        start_y = SCREEN_WIDTH // 2 - 100 # Using X center for Y? Typo in thought, let's fix coords
-        center_x = SCREEN_WIDTH // 2 - 200
-        start_y = 200
+        btn_w = 400
+        center_x = SCREEN_WIDTH // 2 - btn_w // 2
+        start_y = 220
+        gap = 80
         
         # Identify empty seats
-        # Seat indices 0..current_count-1 are humans.
-        # Bots are current_count..max_players-1.
-        
         for i in range(current_count, max_players):
-            # Default model
             self.bot_settings_local[i] = "Random Bot"
-            
-            btn = Button(f"Seat {i+1}: Random Bot", center_x, start_y, 400, 60, lambda idx=i: self.cycle_local_bot_model(idx))
+            btn = Button(f"Seat {i+1}: Random Bot", center_x, start_y, btn_w, 60, lambda idx=i: self.cycle_local_bot_model(idx))
             self.bot_select_buttons.append(btn)
-            start_y += 80
+            start_y += gap
             
-        self.btn_confirm_bots = Button("CONFIRM & START", center_x, start_y + 20, 400, 60, self.confirm_bot_selection_and_start, color=GREEN)
-        self.btn_cancel_bots = Button("CANCEL", center_x, start_y + 100, 400, 60, lambda: self.set_state("ONLINE_ROOM"), color=RED_ERROR)
+        self.btn_confirm_bots = Button("Confirm & Start", center_x, start_y + 20, btn_w, 60, self.confirm_bot_selection_and_start, color=GREEN)
+        self.btn_cancel_bots = Button("Cancel", center_x, start_y + 90, btn_w, 60, lambda: self.set_state("ONLINE_ROOM"), color=RED_ERROR)
         
         self.state = "BOT_SELECT_POPUP"
 
     def cycle_local_bot_model(self, seat_idx):
-        # print(f"DEBUG: Cycling bot for seat {seat_idx}")
-        # print(f"DEBUG: Available models: {self.available_ai_models}")
-        
+        # ... (logic remains same) ...
         if not self.available_ai_models: return
         
         current = self.bot_settings_local.get(seat_idx, "Random Bot")
@@ -648,7 +738,6 @@ class SplendorApp:
             
         new_model = self.available_ai_models[next_idx]
         self.bot_settings_local[seat_idx] = new_model
-        # print(f"DEBUG: New model: {new_model}")
         
         # Update button text
         target_prefix = f"Seat {seat_idx+1}:"
@@ -658,25 +747,19 @@ class SplendorApp:
                 break
 
     def confirm_bot_selection_and_start(self):
-        # Send updates for all bots
+        # ... (logic remains same) ...
         for seat_idx, model in self.bot_settings_local.items():
-            msg = {
-                "type": "UPDATE_BOT_SETTINGS",
-                "seat_idx": seat_idx,
-                "model": model
-            }
+            msg = {"type": "UPDATE_BOT_SETTINGS", "seat_idx": seat_idx, "model": model}
             self.network.send(json.dumps(msg) + "\n")
-            # We don't wait for response, assuming reliable TCP order
-            
-        # Then start
         self.req_start_game()
 
     def draw_bot_select_popup(self):
         self.draw_online_room() # Background
         s = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA); s.fill((0,0,0,200)); self.screen.blit(s, (0,0))
         
-        title = self.font_xl.render("Configure Bots", True, WHITE)
-        self.screen.blit(title, (SCREEN_WIDTH//2 - 150, 100))
+        title_surf = self.font_xl.render("Configure Bots", True, WHITE)
+        title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 120))
+        self.screen.blit(title_surf, title_rect)
         
         for btn in self.bot_select_buttons:
             btn.draw(self.screen)
@@ -693,6 +776,13 @@ class SplendorApp:
         
         try:
             raw_data = self.network.receive()
+            if raw_data == "DISCONNECT":
+                self.connection_msg = "Error: Server Disconnected"
+                self.disconnect_network()
+                # Use Popup instead of direct state switch
+                self.show_popup("Server Disconnected", "ONLINE_CONNECT")
+                return
+            
             if not raw_data: return
             
             self.network_buffer += raw_data
@@ -734,7 +824,24 @@ class SplendorApp:
                         self.current_room_info = data.get("room")
                         self.is_host = (self.current_room_info["host"] == self.my_player_id)
                         self.am_i_ready = False
-                        self.set_state("ONLINE_ROOM")
+                        
+                        role = data.get("role", "player")
+                        self.is_observer = (role == "observer")
+                        
+                        # Check for Reconnect or Observer Join
+                        is_reconnect = data.get("reconnect", False)
+                        game_started = self.current_room_info.get("started", False)
+                        
+                        if is_reconnect or (self.is_observer and game_started):
+                            # Skip Room Wait UI, go straight to Game
+                            print("Directly entering Game Mode...")
+                            self.set_state("ONLINE_GAME")
+                            # We need to init the game object here if it's not yet created by GAME_STATE_UPDATE
+                            if not self.game:
+                                self.game = Game(p_count=self.current_room_info["max_players"])
+                                self.init_token_buttons()
+                        else:
+                            self.set_state("ONLINE_ROOM")
                         
                     elif msg_type in ["PLAYER_JOINED", "PLAYER_LEFT", "ROOM_UPDATE"]:
                         if self.state == "ONLINE_ROOM":
@@ -756,10 +863,10 @@ class SplendorApp:
                             self.log_action(f"Host changed to {new_host}")
 
                     elif msg_type == "ROOM_CLOSED":
-                        self.log_action(data.get("message", "Room closed."))
+                        # self.log_action(data.get("message", "Room closed.")) # Old
                         self.current_room_info = None
                         self.is_host = False
-                        self.set_state("ONLINE_LOBBY")
+                        self.show_popup("Room has been closed by Host.", "ONLINE_LOBBY")
 
                     elif msg_type == "GAME_STARTED":
                         self.log_action("Game is starting!")
@@ -772,34 +879,41 @@ class SplendorApp:
                         self.init_token_buttons() # Initialize UI buttons for tokens
 
                     elif msg_type == "GAME_LOG":
-                        self.log_action(data.get("message", ""))
+                        if self.state in ["ONLINE_GAME", "ONLINE_ROOM"]:
+                            self.log_action(data.get("message", ""))
 
                     elif msg_type == "GAME_OVER":
-                        # print(f"DEBUG: GAME_OVER packet: {data}")
-                        self.online_winner_name = data.get("winner", "Unknown")
-                        self.log_action(f"Game Over! Winner: {self.online_winner_name}")
-                        self.state = "GAME_OVER"
+                        # Only react if I am actively in the game or waiting room (observer)
+                        if self.state in ["ONLINE_GAME", "ONLINE_ROOM", "BOT_SELECT_POPUP"]:
+                            self.winner_name = data.get("winner", "Unknown")
+                            self.log_action(f"Game Over! Winner: {self.winner_name}")
+                            self.state = "GAME_OVER"
 
                     elif msg_type == "GAME_STATE_UPDATE":
-                        if not self.game:
-                            # Should have been created in GAME_STARTED, but safe fallback
-                            # We guess max players from player list len if not avail?
-                            p_len = len(data.get("state")["players"])
-                            self.game = Game(p_count=p_len)
-                        
-                        update_game_from_state(self.game, data.get("state"))
-                        
-                        # Mapping logic if sent
-                        if "your_seat_mapping" in data:
-                            mapping = data["your_seat_mapping"]
-                            # Key is string in JSON, convert to my_player_id
-                            # But wait, my_player_id IS string.
-                            if self.my_player_id in mapping:
-                                self.user_player_idx = mapping[self.my_player_id]
+                        if self.state in ["ONLINE_GAME", "ONLINE_ROOM", "BOT_SELECT_POPUP"]:
+                            if not self.game:
+                                # Should have been created in GAME_STARTED, but safe fallback
+                                # We guess max players from player list len if not avail?
+                                players_list = data.get("state")["players"]
+                                p_len = len(players_list)
+                                self.game = Game(p_count=p_len)
+                            
+                            update_game_from_state(self.game, data.get("state"))
+                            
+                            # Mapping logic if sent
+                            if "your_seat_mapping" in data:
+                                mapping = data["your_seat_mapping"]
+                                if self.my_player_id in mapping:
+                                    self.user_player_idx = mapping[self.my_player_id]
                                 # print(f"My Seat: {self.user_player_idx}")
 
                     elif msg_type == "ERROR":
-                        self.log_action(f"Server Error: {data.get('message')}")
+                        err_msg = data.get('message', 'Unknown Error')
+                        self.log_action(f"Server Error: {err_msg}")
+                        
+                        # Show error in UI for Login/Connect screens
+                        if self.state in ["ONLINE_LOGIN", "ONLINE_CONNECT"]:
+                            self.connection_msg = f"Error: {err_msg}"
                         
                     elif msg_type == "TIME_UPDATE":
                         self.server_time_str = data.get("time")
@@ -814,16 +928,31 @@ class SplendorApp:
 
     def update_room_buttons(self):
         self.room_join_buttons = []
-        start_y = 150
+        
+        MARGIN = 60
+        box_x = MARGIN
+        box_w = 450
+        start_y = 150 + 20 # Box starts at 120. Content starts lower.
+        
+        # Center of the box
+        center_x = box_x + box_w // 2
+        
         for room in self.lobby_rooms:
             label = f"{room['name']} ({len(room['players'])}/{room['max_players']})"
             # Status
             if room['started']: label += " [PLAYING]"
             
-            btn = Button("JOIN " + label, 50, start_y, 400, 50, lambda rid=room['id']: self.req_join_room(rid))
+            # Removed JOIN/WATCH prefix and reduced font size to 18
+            btn = Button(label, 0, start_y, 400, 50, lambda rid=room['id']: self.req_join_room(rid), font_size=18)
+            btn.rect.centerx = center_x # Align center
+            
             if room['started'] or len(room['players']) >= room['max_players']:
-                btn.color = GRAY
-                btn.is_active = False # Can't join full/started
+                # If started, allow observing? Yes, server supports it now.
+                if room['started']:
+                    btn.color = BLUE_RESERVE
+                else:
+                    btn.color = GRAY
+                btn.is_active = True # Allow observing
             else:
                 btn.color = GREEN
             
@@ -1063,7 +1192,20 @@ class SplendorApp:
             
             self.draw_text_with_outline(str(gem_val), self.font_l, bank_x, current_y, WHITE, BLACK, 2)
             
-            if i < 5 and self.state in ["AI_VS_USER", "ONLINE_GAME"] and self.game.curr_player_idx == self.user_player_idx and self.player_action_state != "DISCARDING_TOKENS":
+            # Hide token buttons for observers and AI_VS_AI
+            if i < 5 and self.state == "ONLINE_GAME" and self.game.curr_player_idx == self.user_player_idx and self.player_action_state != "DISCARDING_TOKENS":
+                if not self.is_observer: # Check observer
+                    plus, minus = self.token_buttons[i]
+                    if plus and minus:
+                        plus.draw(self.screen)
+                        minus.draw(self.screen)
+                        p_val = self.pending_tokens[i]
+                        p_surf = self.font_m.render(str(p_val), True, BLACK)
+                        p_rect = p_surf.get_rect(center=(btn_x + 37.5, current_y))
+                        self.screen.blit(p_surf, p_rect)
+            
+            # AI vs User mode (Local)
+            elif i < 5 and self.state == "AI_VS_USER" and self.game.curr_player_idx == self.user_player_idx and self.player_action_state != "DISCARDING_TOKENS":
                 plus, minus = self.token_buttons[i]
                 if plus and minus:
                     plus.draw(self.screen)
@@ -1073,7 +1215,7 @@ class SplendorApp:
                     p_rect = p_surf.get_rect(center=(btn_x + 37.5, current_y))
                     self.screen.blit(p_surf, p_rect)
 
-        # 4. Draw Players (Right Side & Bottom)
+        # ... (Player boxes drawing) ...
         curr_p = self.game.get_curr_player()
         user_p = self.game.players[self.user_player_idx]
         
@@ -1086,7 +1228,11 @@ class SplendorApp:
         
         # User stats in bottom box
         if self.state in ["AI_VS_USER", "ONLINE_GAME"]:
-            name_text = f"{user_p.name} ({user_p.points()} pts)"
+            if self.is_observer:
+                name_text = f"Spectating: {curr_p.name}"
+                display_p = curr_p # Show current player info instead of 'me'
+            else:
+                name_text = f"{user_p.name} ({user_p.points()} pts)"
         else:
             name_text = f"{curr_p.name} ({curr_p.points()} pts)"
             
@@ -1142,11 +1288,11 @@ class SplendorApp:
         opp_y = 50
         
         # Decide who to show in the side list
-        if self.state == "AI_VS_AI":
+        if self.state == "AI_VS_AI" or self.is_observer:
             # Show everyone
             players_to_show = self.game.players
         else:
-            # AI_VS_USER: Show only the bots (not the user)
+            # AI_VS_USER or ONLINE_GAME (Active Player): Show only the opponents
             players_to_show = [p for p in self.game.players if p != user_p]
 
         for p in players_to_show:
@@ -1210,14 +1356,16 @@ class SplendorApp:
             opp_y += 130
         
         # Buttons...
-        confirm_btn_center_x = player_box_x + 370
-        cancel_btn_center_x = player_box_x + 490
-        self.confirm_button.rect.x = confirm_btn_center_x
-        self.confirm_button.rect.y = 660 # Adjusted Y
-        self.cancel_button.rect.x = cancel_btn_center_x
-        self.cancel_button.rect.y = 660 # Adjusted Y
-        self.confirm_button.draw(self.screen)
-        self.cancel_button.draw(self.screen)
+        # Only show for active players in AI_VS_USER or ONLINE_GAME (if not observer)
+        if (self.state == "AI_VS_USER" or (self.state == "ONLINE_GAME" and not self.is_observer)):
+            confirm_btn_center_x = player_box_x + 370
+            cancel_btn_center_x = player_box_x + 490
+            self.confirm_button.rect.x = confirm_btn_center_x
+            self.confirm_button.rect.y = 660 # Adjusted Y
+            self.cancel_button.rect.x = cancel_btn_center_x
+            self.cancel_button.rect.y = 660 # Adjusted Y
+            self.confirm_button.draw(self.screen)
+            self.cancel_button.draw(self.screen)
 
         if self.state == "AI_VS_AI":
             status_text = "PLAYING" if self.ai_vs_ai_auto_play else "PAUSED (SPACE)"
@@ -1238,18 +1386,18 @@ class SplendorApp:
     def draw_game_over(self):
         self.screen.fill(WHITE)
         
-        winner_name = "Unknown"
-        if self.online_winner_name:
-            winner_name = self.online_winner_name
-        else:
+        display_name = "Unknown"
+        if self.winner_name:
+            display_name = self.winner_name
+        elif self.game:
             winner = self.game.check_winner()
-            winner_name = winner.name if winner else "Unknown"
+            if winner: display_name = winner.name
         
         title_surf = self.font_xl.render("GAME OVER", True, BLACK)
         title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 - 50))
         self.screen.blit(title_surf, title_rect)
         
-        winner_surf = self.font_l.render(f"Winner: {winner_name}", True, GREEN)
+        winner_surf = self.font_l.render(f"Winner: {display_name}", True, GREEN)
         winner_rect = winner_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 + 20))
         self.screen.blit(winner_surf, winner_rect)
         
@@ -1298,8 +1446,8 @@ class SplendorApp:
         self.screen.blit(sub_msg, sub_rect)
         
         # Buttons
-        btn_yes = Button("YES (Skip)", rect.x + 30, rect.bottom - 70, 150, 50, self.do_skip_turn, color=RED_ERROR, font_size=20)
-        btn_no = Button("NO (Cancel)", rect.right - 180, rect.bottom - 70, 150, 50, self.cancel_skip_turn, color=GRAY, font_size=20)
+        btn_yes = Button("Yes (Skip)", rect.x + 30, rect.bottom - 70, 150, 50, self.do_skip_turn, color=RED_ERROR, font_size=20)
+        btn_no = Button("No (Cancel)", rect.right - 180, rect.bottom - 70, 150, 50, self.cancel_skip_turn, color=GRAY, font_size=20)
         
         btn_yes.draw(self.screen)
         btn_no.draw(self.screen)
@@ -1316,7 +1464,10 @@ class SplendorApp:
             self.req_game_action(action)
             return
 
-        self.log_action(f"Player {self.game.get_curr_player().name} skipped turn.")
+        # self.log_action(f"Player {self.game.get_curr_player().name} skipped turn.")
+        msg = self.format_action_log(self.game.get_curr_player().name, action)
+        self.log_action(msg)
+        
         self.game.step(action)
         self.player_action_state = "IDLE"
         self.state = "AI_VS_USER" 
@@ -1339,14 +1490,47 @@ class SplendorApp:
         pygame.draw.rect(self.screen, WHITE, rect, border_radius=10)
         pygame.draw.rect(self.screen, BLACK, rect, 3, border_radius=10)
         
-        self.screen.blit(self.font_l.render("Destroy Room?", True, BLACK), (rect.centerx-100, rect.top+30))
-        self.screen.blit(self.font_s.render("All players will be kicked.", True, RED_ERROR), (rect.centerx-100, rect.top+80))
+        title_surf = self.font_l.render("Destroy Room?", True, BLACK)
+        title_rect = title_surf.get_rect(center=(rect.centerx, rect.top + 50))
+        self.screen.blit(title_surf, title_rect)
         
-        self.destroy_yes_btn = Button("YES", rect.x+30, rect.bottom-70, 150, 50, self.req_close_room, color=RED_ERROR)
-        self.destroy_no_btn = Button("NO", rect.right-180, rect.bottom-70, 150, 50, lambda: self.set_state("ONLINE_ROOM"), color=GRAY)
+        sub_surf = self.font_s.render("All players will be kicked.", True, RED_ERROR)
+        sub_rect = sub_surf.get_rect(center=(rect.centerx, rect.top + 90))
+        self.screen.blit(sub_surf, sub_rect)
+        
+        self.destroy_yes_btn = Button("Yes", rect.x+30, rect.bottom-70, 150, 50, self.req_close_room, color=RED_ERROR)
+        self.destroy_no_btn = Button("No", rect.right-180, rect.bottom-70, 150, 50, lambda: self.set_state("ONLINE_ROOM"), color=GRAY)
         
         self.destroy_yes_btn.draw(self.screen)
         self.destroy_no_btn.draw(self.screen)
+
+    def confirm_popup(self):
+        self.state = self.popup_next_state
+
+    def show_popup(self, text, next_state):
+        self.popup_text = text
+        self.popup_next_state = next_state
+        self.state = "POPUP_MESSAGE"
+
+    def draw_popup_message(self):
+        # Clean background
+        self.screen.fill((30, 30, 30))
+        
+        # Larger Box
+        box_w, box_h = 500, 250
+        rect = pygame.Rect(SCREEN_WIDTH//2 - box_w//2, SCREEN_HEIGHT//2 - box_h//2, box_w, box_h)
+        pygame.draw.rect(self.screen, WHITE, rect, border_radius=15)
+        pygame.draw.rect(self.screen, BLACK, rect, 3, border_radius=15)
+        
+        # Message - Reduced font size to font_m
+        msg_surf = self.font_m.render(self.popup_text, True, BLACK)
+        msg_rect = msg_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 - 30))
+        self.screen.blit(msg_surf, msg_rect)
+        
+        # OK Button - Shifted down for more spacing
+        self.btn_popup_ok.rect.centerx = SCREEN_WIDTH // 2
+        self.btn_popup_ok.rect.y = SCREEN_HEIGHT // 2 + 40
+        self.btn_popup_ok.draw(self.screen)
 
     def draw_menu(self):
         self.screen.fill(WHITE)
@@ -1398,49 +1582,100 @@ class SplendorApp:
 
     def draw_online_lobby(self):
         self.screen.fill(WHITE)
-        self.btn_global_back.draw(self.screen)
+        # self.btn_global_back.draw(self.screen) # Removed per request
         
+        # --- Layout Constants ---
+        MARGIN = 60 # Unified Margin
+        
+        # Rooms Box
+        box_x, box_y, box_w, box_h = MARGIN, 120, 450, 510
+        
+        # Create Room Box
+        c_box_w = 450
+        c_box_h = 320 
+        c_box_x = SCREEN_WIDTH - c_box_w - MARGIN # Right margin MARGIN
+        c_box_y = 120 # Same Y as Rooms box
+        
+        # Center Title
         title_surf = self.font_l.render(f"Lobby - ID: {self.my_player_id}", True, BLACK)
-        self.screen.blit(title_surf, (150, 30)) # Shifted right
+        title_rect = title_surf.get_rect(center=(SCREEN_WIDTH // 2, 50))
+        self.screen.blit(title_surf, title_rect)
         
-        # Connection Test (Time)
+        # Connection Test (Time) - Aligned with Create Box Right
         time_surf = self.font_m.render(f"Server Time: {self.server_time_str}", True, BLUE_RESERVE)
-        self.screen.blit(time_surf, (SCREEN_WIDTH - 250, 30))
+        time_rect = time_surf.get_rect(topright=(c_box_x + c_box_w, 30))
+        self.screen.blit(time_surf, time_rect)
         
-        # Show Success Message from Server
-        if self.connection_msg and not self.connection_msg.startswith("Error"):
-            msg_surf = self.font_m.render(self.connection_msg, True, GREEN)
-            self.screen.blit(msg_surf, (50, 70))
+        # --- Room List Area ---
+        pygame.draw.rect(self.screen, (240, 240, 240), (box_x, box_y, box_w, box_h))
+        pygame.draw.rect(self.screen, BLACK, (box_x, box_y, box_w, box_h), 2)
         
-        # Room List Area
-        pygame.draw.rect(self.screen, (240, 240, 240), (40, 100, 420, 530))
-        pygame.draw.rect(self.screen, BLACK, (40, 100, 420, 530), 2)
+        # "Rooms" Title centered over box
+        rooms_label = self.font_l.render("Rooms", True, BLACK)
+        rooms_rect = rooms_label.get_rect(center=(box_x + box_w // 2, box_y - 25))
+        self.screen.blit(rooms_label, rooms_rect)
         
         if not self.room_join_buttons:
             info = self.font_m.render("No rooms found...", True, DARK_GRAY)
-            self.screen.blit(info, (100, 150))
+            info_rect = info.get_rect(center=(box_x + box_w // 2, box_y + 50))
+            self.screen.blit(info, info_rect)
             
         for btn in self.room_join_buttons:
+            # Center buttons relative to the box
+            btn.rect.centerx = box_x + box_w // 2
             btn.draw(self.screen)
             
-        # Create Room Area (Right Side)
-        pygame.draw.rect(self.screen, (230, 230, 250), (SCREEN_WIDTH - 400, 100, 350, 300))
-        pygame.draw.rect(self.screen, BLACK, (SCREEN_WIDTH - 400, 100, 350, 300), 2)
+        # --- Create Room Area (Right Side) ---
+        pygame.draw.rect(self.screen, (230, 230, 250), (c_box_x, c_box_y, c_box_w, c_box_h))
+        pygame.draw.rect(self.screen, BLACK, (c_box_x, c_box_y, c_box_w, c_box_h), 2)
         
-        lbl = self.font_m.render("Create New Room", True, BLACK)
-        self.screen.blit(lbl, (SCREEN_WIDTH - 350, 120))
+        c_center_x = c_box_x + c_box_w // 2
         
+        # Title
+        lbl = self.font_l.render("Create New Room", True, BLACK)
+        lbl_rect = lbl.get_rect(center=(c_center_x, c_box_y - 25))
+        self.screen.blit(lbl, lbl_rect)
+        
+        # Input Field - Top Margin 50
+        self.room_name_input.rect.centerx = c_center_x
+        self.room_name_input.rect.y = c_box_y + 50
         self.room_name_input.draw(self.screen)
         
         # Max Player Buttons
+        btn_w = 90
+        spacing = 15
+        total_btn_w = (btn_w * 3) + (spacing * 2)
+        start_btn_x = c_center_x - total_btn_w // 2
+        
+        buttons_y = c_box_y + 150
+        
+        self.btn_mp_2.rect.x = start_btn_x
+        self.btn_mp_2.rect.y = buttons_y
+        
+        self.btn_mp_3.rect.x = start_btn_x + btn_w + spacing
+        self.btn_mp_3.rect.y = buttons_y
+        
+        self.btn_mp_4.rect.x = start_btn_x + (btn_w + spacing) * 2
+        self.btn_mp_4.rect.y = buttons_y
+        
         self.btn_mp_2.draw(self.screen)
         self.btn_mp_3.draw(self.screen)
         self.btn_mp_4.draw(self.screen)
         
+        # Create Button
+        self.btn_create_room.rect.centerx = c_center_x
+        self.btn_create_room.rect.y = c_box_y + 225
         self.btn_create_room.draw(self.screen)
+        
+        # Aligned Refresh Button
+        self.btn_refresh_rooms.rect.x = box_x # Align with box left
+        self.btn_refresh_rooms.font = self.font_m # Standardize font
         self.btn_refresh_rooms.draw(self.screen)
         
         back_btn = Button("Disconnect", SCREEN_WIDTH - 250, 650, 200, 50, self.disconnect_network, color=RED_ERROR)
+        # Align Disconnect button with right edge of Create Box
+        back_btn.rect.right = c_box_x + c_box_w 
+        back_btn.font = self.font_m # Standardize font
         back_btn.draw(self.screen)
         self.temp_back_btn = back_btn 
 
@@ -1451,76 +1686,140 @@ class SplendorApp:
         if not self.current_room_info: return
         
         r = self.current_room_info
-        title = f"Room: {r['name']} ({len(r['players'])}/{r['max_players']})"
+        max_p = r['max_players']
+        p_details = r.get("player_details", []) # Connected players + Bots
+        
+        # Title
+        title = f"Room: {r['name']} ({len(r['players'])}/{max_p})"
         t_surf = self.font_xl.render(title, True, BLACK)
-        t_rect = t_surf.get_rect(center=(SCREEN_WIDTH//2, 80))
+        t_rect = t_surf.get_rect(center=(SCREEN_WIDTH//2, 60))
         self.screen.blit(t_surf, t_rect)
         
-        # Player List
-        y = 200
+        # Grid Layout
+        start_x = (SCREEN_WIDTH - 640) // 2
+        start_y = 150
+        slot_w, slot_h = 300, 180
+        gap_x, gap_y = 40, 40
+        
         all_ready = True
-        self.bot_config_buttons = [] # Reset per frame for immediate mode check
+        self.bot_config_buttons = [] # Reset for click handling
         
-        # Use player_details list for status
-        p_details = r.get("player_details", [])
+        for i in range(4):
+            # Calculate position
+            col = i % 2
+            row = i // 2
+            x = start_x + col * (slot_w + gap_x)
+            y = start_y + row * (slot_h + gap_y)
+            rect = pygame.Rect(x, y, slot_w, slot_h)
+            
+            # --- Case 1: Closed Slot ---
+            if i >= max_p:
+                pygame.draw.rect(self.screen, DARK_GRAY, rect, border_radius=10)
+                pygame.draw.rect(self.screen, BLACK, rect, 2, border_radius=10)
+                
+                lbl = self.font_l.render("CLOSED", True, (150, 150, 150))
+                lbl_rect = lbl.get_rect(center=rect.center)
+                self.screen.blit(lbl, lbl_rect)
+                continue
+            
+            # --- Case 2: Occupied Slot (Only show Humans here) ---
+            # Current player_details includes bots by default. Let's filter to only show real players.
+            # OR better: Check if p_data["is_bot"] is true.
+            if i < len(p_details):
+                p_data = p_details[i]
+                if not p_data.get("is_bot", False):
+                    # REAL PLAYER
+                    pid = p_data["id"]
+                    name = p_data["name"]
+                    is_ready = p_data["ready"]
+                    role = "HOST" if pid == r['host'] else "PLAYER"
+                    
+                    if not is_ready: all_ready = False
+                    
+                    bg_color = (240, 248, 255) if pid == self.my_player_id else WHITE
+                    pygame.draw.rect(self.screen, bg_color, rect, border_radius=10)
+                    pygame.draw.rect(self.screen, BLACK, rect, 2, border_radius=10)
+                    
+                    name_surf = self.font_l.render(name, True, BLACK)
+                    self.screen.blit(name_surf, (x + 20, y + 20))
+                    
+                    role_surf = self.font_m.render(role, True, BLUE_RESERVE if role == "HOST" else DARK_GRAY)
+                    self.screen.blit(role_surf, (x + 20, y + 60))
+
+                    status_color = GREEN if is_ready else RED_ERROR
+                    status_text = "READY" if is_ready else "WAITING"
+                    status_rect = pygame.Rect(x + 20, y + 130, 260, 35)
+                    pygame.draw.rect(self.screen, status_color, status_rect, border_radius=5)
+                    s_surf = self.font_m.render(status_text, True, WHITE)
+                    s_rect = s_surf.get_rect(center=status_rect.center)
+                    self.screen.blit(s_surf, s_rect)
+                    continue # Finished drawing this slot
+                
+            # --- Case 3: Empty Slot (Including slots pre-filled with Bots) ---
+            pygame.draw.rect(self.screen, (230, 230, 230), rect, border_radius=10)
+            pygame.draw.rect(self.screen, BLACK, rect, 2, border_radius=10)
+            lbl = self.font_l.render("EMPTY", True, (180, 180, 180))
+            lbl_rect = lbl.get_rect(center=rect.center)
+            self.screen.blit(lbl, lbl_rect)
+
+        # Footer Buttons - Unified Margin (y=650), Font Size Reduced
+        footer_y = 650
+        margin_side = 60
+        btn_w = 200
+        btn_gap = 20
         
-        # Draw connected players and bots
-        for i, p_data in enumerate(p_details):
-            pid = p_data["id"]
-            name = p_data["name"]
-            is_ready = p_data["ready"]
-            is_bot = p_data.get("is_bot", False)
-            
-            if not is_ready: all_ready = False
-            
-            role = "HOST" if pid == r['host'] else "PLAYER"
-            color = GREEN if pid == self.my_player_id else BLACK
-            
-            status_text = "[READY]" if is_ready else "[WAITING]"
-            status_color = GREEN if is_ready else RED_ERROR
-            
-            # If it's a Bot and I am Host, allow configuration
-            if is_bot and self.is_host:
-                model_name = p_data.get("model", "Random Bot")
-                btn_txt = f"{name}: {model_name} (Click to Change)"
-                # Seat index is 'i' (0-based index in the player list... wait, player_details might be sparse? 
-                # No, to_dict fills it in order: humans then bots)
-                # Correct seat index is 'i'.
-                
-                # Draw button instead of text
-                btn = Button(btn_txt, SCREEN_WIDTH//2 - 200, y, 400, 40, lambda idx=i, m=model_name: self.req_update_bot(idx, m), color=GRAY, font_size=18)
-                btn.draw(self.screen)
-                self.bot_config_buttons.append(btn)
-            else:
-                # Normal Text Display
-                p_text = f"{i+1}. {name} [{role}]"
-                if is_bot: p_text += f" ({p_data.get('model', 'Random')})"
-                
-                p_surf = self.font_l.render(p_text, True, color)
-                self.screen.blit(p_surf, (SCREEN_WIDTH//2 - 200, y))
-                
-                s_surf = self.font_l.render(status_text, True, status_color)
-                self.screen.blit(s_surf, (SCREEN_WIDTH//2 + 100, y))
-            
-            y += 50
-            
+        # 1. Leave Room (Leftmost)
+        self.btn_leave_room.rect.x = margin_side
+        self.btn_leave_room.rect.y = footer_y
+        self.btn_leave_room.font = self.font_m
         self.btn_leave_room.draw(self.screen)
         
-        # Update Ready Button
-        self.btn_toggle_ready.text = "NOT READY" if self.am_i_ready else "READY?"
-        self.btn_toggle_ready.color = GREEN if self.am_i_ready else GRAY
-        self.btn_toggle_ready.draw(self.screen)
-        
-        if self.is_host:
-            self.btn_close_room.draw(self.screen)
-            # Update Start Button
-            if all_ready:
-                self.btn_start_online_game.color = GREEN
-                self.btn_start_online_game.is_active = True
+        if self.is_observer:
+            # Show Observer Status
+            status_surf = self.font_l.render("SPECTATOR MODE", True, BLUE_RESERVE)
+            s_rect = status_surf.get_rect(center=(SCREEN_WIDTH//2, footer_y + 25))
+            self.screen.blit(status_surf, s_rect)
+        else:
+            # Coordinates
+            start_x = SCREEN_WIDTH - margin_side - btn_w # 1020
+            ready_x_host = start_x - btn_w - btn_gap     # 800
+            destroy_x = margin_side + btn_w + btn_gap    # 280
+            
+            if self.is_host:
+                # 2. Destroy Room (Left, Next to Leave)
+                self.btn_close_room.rect.x = destroy_x
+                self.btn_close_room.rect.y = footer_y
+                self.btn_close_room.font = self.font_m
+                self.btn_close_room.draw(self.screen)
+                
+                # 3. Ready Button (Right, Next to Start)
+                self.btn_toggle_ready.rect.x = ready_x_host
+                self.btn_toggle_ready.rect.y = footer_y
+                self.btn_toggle_ready.font = self.font_m
+                self.btn_toggle_ready.text = "CANCEL READY" if self.am_i_ready else "READY"
+                self.btn_toggle_ready.color = RED_ERROR if self.am_i_ready else GREEN
+                self.btn_toggle_ready.draw(self.screen)
+                
+                # 4. Start Button (Rightmost)
+                self.btn_start_online_game.rect.x = start_x
+                self.btn_start_online_game.rect.y = footer_y
+                self.btn_start_online_game.font = self.font_m
+                if all_ready:
+                    self.btn_start_online_game.color = GREEN
+                    self.btn_start_online_game.is_active = True
+                else:
+                    self.btn_start_online_game.color = GRAY
+                    self.btn_start_online_game.is_active = False
+                self.btn_start_online_game.draw(self.screen)
+                
             else:
-                self.btn_start_online_game.color = GRAY
-                self.btn_start_online_game.is_active = False
-            self.btn_start_online_game.draw(self.screen)
+                # Guest: Only Ready Button (Rightmost)
+                self.btn_toggle_ready.rect.x = start_x
+                self.btn_toggle_ready.rect.y = footer_y
+                self.btn_toggle_ready.font = self.font_m
+                self.btn_toggle_ready.text = "CANCEL READY" if self.am_i_ready else "READY"
+                self.btn_toggle_ready.color = RED_ERROR if self.am_i_ready else GREEN
+                self.btn_toggle_ready.draw(self.screen)
 
     def draw_online_game(self):
         # Reuse local game board drawing
@@ -1537,7 +1836,13 @@ class SplendorApp:
         if self.network:
             self.network.disconnect()
             self.network = None
+        
+        # Reset UI State
         self.state = "MENU"
+        self.connection_msg = ""
+        self.my_player_id = None
+        self.login_id_input.text = ""
+        self.login_pw_input.text = ""
 
     def draw_game_placeholder(self, mode_name):
         self.screen.fill(WHITE)
@@ -1570,42 +1875,74 @@ class SplendorApp:
         
         self.ai_config_buttons = []
         
-        # Determine number of AI slots
-        num_ai = p_count if self.selected_mode == "AI_VS_AI" else p_count - 1
+        # Always create 4 slots for visual balance
+        # In AI_VS_USER: Seat 0 is YOU. We configure Seat 1, 2, 3.
+        # In AI_VS_AI: We configure Seat 0, 1, 2, 3.
         
-        for i in range(num_ai):
-            label = f"Seat {i+1}" if self.selected_mode == "AI_VS_AI" else f"Opponent {i+1}"
-            btn = Button(f"{label}: Random Bot", center_x_ai, start_y + i*gap, btn_w_ai, 80, lambda idx=i: self.cycle_ai_model(idx), font_size=20)
-            btn.model_idx = 0 
+        total_slots = 4
+        
+        for i in range(total_slots):
+            # Logic to determine if this slot is active
+            is_active = False
+            label = "Empty"
+            
+            if self.selected_mode == "AI_VS_AI":
+                if i < p_count:
+                    is_active = True
+                    label = f"Seat {i+1}"
+            else: # AI_VS_USER
+                # User is technically "Seat X" (randomized later), but for config we treat
+                # slots as "Opponent 1, 2, 3".
+                # If 2 Players: You + 1 Bot. Config Slot 0 (Bot 1). Slot 1,2,3 Empty.
+                # Wait, "Opponent 1" corresponds to logic index 0 in the `models_list` passed to start function.
+                num_bots = p_count - 1
+                if i < num_bots:
+                    is_active = True
+                    label = f"Opponent {i+1}"
+            
+            if is_active:
+                btn = Button(f"{label}: Random Bot", center_x_ai, start_y + i*gap, btn_w_ai, 80, lambda idx=i: self.cycle_ai_model(idx), font_size=20)
+                btn.model_idx = 0 
+                btn.is_active = True
+                btn.color = GRAY
+            else:
+                btn = Button("Empty Seat", center_x_ai, start_y + i*gap, btn_w_ai, 80, lambda: None, font_size=20)
+                btn.is_active = False
+                btn.color = DARK_GRAY
+                
             self.ai_config_buttons.append(btn)
             
         # Start Button
-        start_btn_y = start_y + num_ai * gap + 20
+        start_btn_y = start_y + total_slots * gap + 20
         self.start_game_button = Button("START GAME", center_x_start, start_btn_y, btn_w_start, 80, self.confirm_ai_selection, color=GREEN, font_size=25)
             
         self.state = "AI_SELECT"
 
     def cycle_ai_model(self, btn_idx):
         btn = self.ai_config_buttons[btn_idx]
+        if not btn.is_active: return
+        
         # Increment index
         btn.model_idx = (btn.model_idx + 1) % len(self.ai_models)
         # Update text
         model_name = self.ai_models[btn.model_idx]
-        prefix = f"Seat {btn_idx+1}" if self.selected_mode == "AI_VS_AI" else f"Opponent {btn_idx+1}"
+        
+        # Re-derive label prefix
+        if self.selected_mode == "AI_VS_AI":
+            prefix = f"Seat {btn_idx+1}"
+        else:
+            prefix = f"Opponent {btn_idx+1}"
+            
         btn.text = f"{prefix}: {model_name}"
 
     def confirm_ai_selection(self):
-        # Collect models
+        # Collect models only from active buttons
         selected_models_list = []
         for btn in self.ai_config_buttons:
-            model_name = self.ai_models[btn.model_idx]
-            selected_models_list.append(model_name)
+            if btn.is_active:
+                model_name = self.ai_models[btn.model_idx]
+                selected_models_list.append(model_name)
             
-        # Pre-load models (Cache them?)
-        # We need to map Player Index -> Model.
-        # But we don't know Player Indices for AI_VS_USER yet (user is random).
-        # So we pass the list of models to the start function.
-        
         if self.selected_mode == "AI_VS_AI":
             self.start_ai_vs_ai(self.temp_player_count, selected_models_list)
         elif self.selected_mode == "AI_VS_USER":
@@ -1683,7 +2020,10 @@ class SplendorApp:
                             self.player_action_state = "IDLE"
                             return
 
-                        self.log_action(f"Player {self.game.get_curr_player().name} discards {Gem(i).name}")
+                        # self.log_action(f"Player {self.game.get_curr_player().name} discards {Gem(i).name}")
+                        msg = self.format_action_log(self.game.get_curr_player().name, action)
+                        self.log_action(msg)
+                        
                         self.game.step(action)
                         if self.game.get_curr_player().token_count() <= 10:
                             self.player_action_state = "IDLE" 
@@ -1771,7 +2111,10 @@ class SplendorApp:
                 return
 
             try:
-                self.log_action(f"You reserved a hidden Level {tier} card.")
+                # self.log_action(f"You reserved a hidden Level {tier} card.")
+                msg = self.format_action_log(player.name, action)
+                self.log_action(msg)
+                
                 self.game.step(action)
                 self.close_card_popup()
                 self.end_turn()
@@ -1864,7 +2207,10 @@ class SplendorApp:
                     'card': self.selected_card_obj,
                     'tier': self.selected_card_tier,
                 }
-                self.log_action(f"Player {player.name} bought a Level {self.selected_card_tier} card.")
+                # self.log_action(f"Player {player.name} bought a Level {self.selected_card_tier} card.")
+                msg = self.format_action_log(player.name, action)
+                self.log_action(msg)
+                
                 self.game.step(action)
                 self.close_card_popup()
                 self.end_turn()
@@ -1903,7 +2249,10 @@ class SplendorApp:
                     'card': self.selected_card_obj,
                     'tier': self.selected_card_tier,
                 }
-                self.log_action(f"Player {player.name} reserved a Level {self.selected_card_tier} card.")
+                # self.log_action(f"Player {player.name} reserved a Level {self.selected_card_tier} card.")
+                msg = self.format_action_log(player.name, action)
+                self.log_action(msg)
+                
                 self.game.step(action)
                 self.close_card_popup()
                 self.end_turn()
@@ -1941,7 +2290,10 @@ class SplendorApp:
                     'card': reserved_card,
                     'reserved_idx': self.selected_reserved_card_idx 
                 }
-                self.log_action(f"Player {player.name} bought a reserved card.")
+                # self.log_action(f"Player {player.name} bought a reserved card.")
+                msg = self.format_action_log(player.name, action)
+                self.log_action(msg)
+                
                 self.game.step(action)
                 self.close_card_popup()
                 self.end_turn()
@@ -1972,6 +2324,7 @@ class SplendorApp:
             if self.game.curr_player_idx == 0:
                 winner = self.game.check_winner()
                 if winner:
+                    self.winner_name = winner.name
                     self.log_action(f"Game Over! Winner is {winner.name}!")
                     self.state = "GAME_OVER"
                     break
@@ -1997,12 +2350,18 @@ class SplendorApp:
 
         winner = self.game.check_winner()
         if winner:
+            self.winner_name = winner.name
             self.log_action(f"Game Over! Winner is {winner.name}!")
-            self.state = "MENU" 
+            self.state = "GAME_OVER" 
             return
 
         # self.game.next_turn() # Removed redundant call
-        self.log_action(f"It's {self.game.get_curr_player().name}'s turn.")
+        # self.log_action(f"It's {self.game.get_curr_player().name}'s turn.") # Removed per request
+
+        if self.state == "AI_VS_AI":
+            # In AI vs AI mode, the main loop handles the timing of moves.
+            # Don't trigger run_ai_turns_until_user here.
+            return
 
         if self.game.curr_player_idx != self.user_player_idx and not self.game.game_over:
             self.run_ai_turns_until_user() 
@@ -2028,34 +2387,22 @@ class SplendorApp:
         if action is None:
             actions = self.game.get_valid_actions()
             if not actions:
-                self.log_action(f"{player.name} has no valid moves. Skipping.")
+                self.log_action(f"{player.name}: No moves. Skipping.")
                 self.game.next_turn()
                 return
             action = random.choice(actions)
         
-        # Log based on action type
-        at = action['type']
-        if at == 'discard_token':
-            self.log_action(f"{player.name} discards {Gem(action['gem_idx']).name}.")
-        elif at == 'buy_card':
-            self.log_action(f"{player.name} bought a card.")
-        elif at == 'buy_reserved':
-            self.log_action(f"{player.name} bought a reserved card.")
-        elif at == 'get_token':
-            self.log_action(f"{player.name} took tokens: {action['tokens']}.")
-        elif at == 'reserve_card':
-            self.log_action(f"{player.name} reserved a card.")
-        elif at == 'reserve_deck':
-            self.log_action(f"{player.name} reserved from deck.")
-        else:
-            self.log_action(f"{player.name} chose action: {at}")
+        # Remove detailed pre-logging (relies on format_action_log later)
         
         try:
             self.game.step(action)
+            msg = self.format_action_log(player.name, action)
+            self.log_action(msg)
+            
+            self.end_turn()
         except Exception as e:
-            self.log_action(f"AI Error: {e}")
+            # self.log_action(f"AI Error: {e}")
             print(f"AI Error: {e}")
-            traceback.print_exc()
             self.game.next_turn()
         
         if player.token_count() > 10:
@@ -2064,17 +2411,18 @@ class SplendorApp:
     def ai_discard_tokens(self):
         player = self.game.get_curr_player()
         while player.token_count() > 10:
-            discardable_gems = [i for i, count in enumerate(player.tokens[:5]) if count > 0] 
-            if not discardable_gems: 
-                discardable_gems = [i for i, count in enumerate(player.tokens) if count > 0]
+            gems = [i for i, c in enumerate(player.tokens[:5]) if c > 0]
+            if not gems: gems = [i for i, c in enumerate(player.tokens) if c > 0]
             
-            if discardable_gems:
-                gem_to_discard = random.choice(discardable_gems)
-                action = {'type': 'discard_token', 'gem_idx': gem_to_discard}
-                self.log_action(f"AI {player.name} discards {Gem(gem_to_discard).name}")
+            if gems:
+                gem_idx = random.choice(gems)
+                action = {'type': 'discard_token', 'gem_idx': gem_idx}
+                # self.log_action(f"Player {player.name} discards {Gem(gem_idx).name}")
+                msg = self.format_action_log(player.name, action)
+                self.log_action(msg)
+                
                 self.game.step(action)
-            else:
-                break
+            else: break
             
     def ai_move_step(self):
         if self.state != "AI_VS_AI": return
@@ -2128,7 +2476,7 @@ class SplendorApp:
                         self.btn_do_register.check_click(event)
                     
                     elif self.state == "ONLINE_LOBBY":
-                        self.btn_global_back.check_click(event)
+                        # self.btn_global_back.check_click(event) # Removed ghost button logic
                         self.room_name_input.handle_event(event)
                         self.btn_mp_2.check_click(event)
                         self.btn_mp_3.check_click(event)
@@ -2137,6 +2485,7 @@ class SplendorApp:
                         self.btn_refresh_rooms.check_click(event)
                         if hasattr(self, 'temp_back_btn'):
                             self.temp_back_btn.check_click(event)
+                        
                         for btn in self.room_join_buttons:
                             btn.check_click(event)
 
@@ -2157,7 +2506,7 @@ class SplendorApp:
                     elif self.state == "ONLINE_GAME":
                         if event.type == pygame.MOUSEBUTTONDOWN:
                             if event.button == 1:
-                                self.btn_global_back.check_click(event)
+                                # self.btn_global_back.check_click(event) # Removed ghost button
                                 self.handle_click(event.pos)
 
                     elif self.state == "AI_VS_USER":
@@ -2191,6 +2540,9 @@ class SplendorApp:
                         if event.type == pygame.MOUSEBUTTONDOWN:
                             if hasattr(self, 'game_over_button'):
                                 self.game_over_button.check_click(event)
+                                
+                    elif self.state == "POPUP_MESSAGE":
+                        self.btn_popup_ok.check_click(event)
 
                     elif self.state == "PLAYER_SELECT":
                         self.btn_global_back.check_click(event)
@@ -2256,6 +2608,9 @@ class SplendorApp:
 
                 elif self.state == "ONLINE":
                     self.draw_game_placeholder("Online Multiplayer")
+                
+                elif self.state == "POPUP_MESSAGE":
+                    self.draw_popup_message()
                     
                 pygame.display.flip()
                 self.clock.tick(FPS)

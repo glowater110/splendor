@@ -6,9 +6,10 @@ import uuid
 import glob
 import os
 import random
+import re # Added for validation
 import numpy as np
 from itertools import combinations
-from sb3_contrib import MaskablePPO
+from ai_lite import LiteModel
 from game import Game
 from classdef import Gem, Card, Player
 import database
@@ -21,10 +22,12 @@ class Room:
         self.max_players = max_players
         self.players = [host_id]  # List of player_ids
         self.game_started = False
-        self.bot_settings = {} # {seat_index: "model_name"}
+        self.bot_settings = {} 
         self.game = None
-        self.ai_map = {} # seat_idx -> model
+        self.ai_map = {} 
         self.seat_map = {}
+        self.disconnected_seats = set() 
+        self.observers = [] # List of observer player_ids
 
     def add_player(self, player_id):
         if len(self.players) < self.max_players and not self.game_started:
@@ -32,9 +35,18 @@ class Room:
             return True
         return False
 
+    def add_observer(self, player_id):
+        if player_id not in self.observers and player_id not in self.players:
+            self.observers.append(player_id)
+            return True
+        return False
+
     def remove_player(self, player_id):
         if player_id in self.players:
             self.players.remove(player_id)
+            return True
+        if player_id in self.observers:
+            self.observers.remove(player_id)
             return True
         return False
 
@@ -112,7 +124,6 @@ class SplendorServer:
         self.clients = {}  # {player_id: {"conn": conn, ...}}
         self.lock = threading.Lock()
         
-        # Init DB
         database.init_db()
         self.active_sessions = set() 
         
@@ -124,13 +135,11 @@ class SplendorServer:
         threading.Thread(target=self.broadcast_time_loop, daemon=True).start()
 
     def load_ai_models(self):
-        # print("Loading AI Models...")
         if os.path.exists("models"):
-            for file in glob.glob("models/*.zip"):
+            for file in glob.glob("models/*.npz"):
                 name = os.path.splitext(os.path.basename(file))[0]
                 try:
-                    self.ai_models[name] = MaskablePPO.load(file)
-                    # print(f"Loaded {name}")
+                    self.ai_models[name] = LiteModel(file)
                 except:
                     pass
 
@@ -165,6 +174,15 @@ class SplendorServer:
     def handle_client(self, conn, addr):
         player_id = None
         buffer = ""
+        
+        # Send Handshake immediately
+        try:
+            handshake = json.dumps({"type": "HELLO", "server": "Splendor"}) + "\n"
+            conn.send(handshake.encode('utf-8'))
+        except:
+            conn.close()
+            return
+
         while True:
             try:
                 data = conn.recv(4096).decode('utf-8')
@@ -176,11 +194,17 @@ class SplendorServer:
                     try:
                         request = json.loads(msg_str)
                         cmd = request.get("type")
-                        
                         if not player_id:
                             if cmd == "LOGIN":
-                                username = request.get("username")
-                                password = request.get("password")
+                                username = request.get("username", "")
+                                password = request.get("password", "")
+                                
+                                # Server-side Validation
+                                if not re.match(r"^[a-z0-9_.-]+$", username):
+                                    resp = {"type": "ERROR", "message": "Invalid username format"}
+                                    conn.send((json.dumps(resp) + "\n").encode('utf-8'))
+                                    continue
+
                                 success, msg = database.verify_user(username, password)
                                 if success:
                                     with self.lock:
@@ -199,10 +223,16 @@ class SplendorServer:
                                 else:
                                     resp = {"type": "ERROR", "message": msg}
                                 conn.send((json.dumps(resp) + "\n").encode('utf-8'))
-                                
                             elif cmd == "REGISTER":
-                                username = request.get("username")
-                                password = request.get("password")
+                                username = request.get("username", "")
+                                password = request.get("password", "")
+
+                                # Server-side Validation
+                                if not re.match(r"^[a-z0-9_.-]+$", username):
+                                    resp = {"type": "ERROR", "message": "Invalid username format"}
+                                    conn.send((json.dumps(resp) + "\n").encode('utf-8'))
+                                    continue
+
                                 success, msg = database.register_user(username, password)
                                 resp = {"type": "REGISTER_SUCCESS" if success else "ERROR", "message": msg}
                                 conn.send((json.dumps(resp) + "\n").encode('utf-8'))
@@ -212,7 +242,6 @@ class SplendorServer:
                             self.process_request(player_id, request)
                     except: pass
             except: break
-            
         if player_id:
             self.handle_disconnect(player_id)
             with self.lock:
@@ -249,13 +278,49 @@ class SplendorServer:
                 room = self.rooms.get(rid)
                 if not room: response = {"type": "ERROR", "message": "Not found"}
                 elif self.clients[player_id]["room_id"]: response = {"type": "ERROR", "message": "In room"}
-                elif room.is_full(): response = {"type": "ERROR", "message": "Full"}
                 else:
-                    room.add_player(player_id)
-                    self.clients[player_id]["room_id"] = rid
-                    self.clients[player_id]["ready"] = False
-                    response = {"type": "JOINED_ROOM", "room": room.to_dict(self.clients)}
-                    self.broadcast_to_room(rid, {"type": "PLAYER_JOINED", "player_id": player_id, "room": room.to_dict(self.clients)})
+                    # Check for Reconnection
+                    if room.game_started and player_id in room.seat_map:
+                        # Reconnect Success
+                        self.clients[player_id]["room_id"] = rid
+                        seat_idx = room.seat_map[player_id]
+                        if seat_idx in room.disconnected_seats:
+                            room.disconnected_seats.remove(seat_idx)
+                        
+                        response = {"type": "JOINED_ROOM", "room": room.to_dict(self.clients), "reconnect": True}
+                        self.broadcast_to_room(rid, {"type": "GAME_LOG", "message": f"{self.clients[player_id]['name']} reconnected!"})
+                        
+                        # Send current game state immediately to the reconnecting player
+                        state = serialize_game(room.game)
+                        # We need to send this ONLY to the reconnecting player, but it must be AFTER the response.
+                        # We can append it to the response or send separate packet.
+                        # Send separate packet.
+                        threading.Thread(target=lambda: (time.sleep(0.1), self.clients[player_id]["conn"].send((json.dumps({"type": "GAME_STATE_UPDATE", "state": state, "your_seat_mapping": room.seat_map}) + "\n").encode('utf-8')))).start()
+                        
+                    elif room.is_full() or room.game_started: 
+                        # Join as Observer
+                        room.add_observer(player_id)
+                        self.clients[player_id]["room_id"] = rid
+                        self.clients[player_id]["ready"] = False # Observers aren't ready
+                        
+                        # Tell client they are observing
+                        response = {"type": "JOINED_ROOM", "room": room.to_dict(self.clients), "role": "observer"}
+                        
+                        # Notify others
+                        self.broadcast_to_room(rid, {"type": "GAME_LOG", "message": f"{self.clients[player_id]['name']} is watching."})
+                        
+                        # If game started, send state
+                        if room.game_started:
+                             state = serialize_game(room.game)
+                             threading.Thread(target=lambda: (time.sleep(0.1), self.clients[player_id]["conn"].send((json.dumps({"type": "GAME_STATE_UPDATE", "state": state, "your_seat_mapping": room.seat_map}) + "\n").encode('utf-8')))).start()
+
+                    else:
+                        # Normal Join
+                        room.add_player(player_id)
+                        self.clients[player_id]["room_id"] = rid
+                        self.clients[player_id]["ready"] = False
+                        response = {"type": "JOINED_ROOM", "room": room.to_dict(self.clients), "role": "player"}
+                        self.broadcast_to_room(rid, {"type": "PLAYER_JOINED", "player_id": player_id, "room": room.to_dict(self.clients)})
 
             elif cmd == "LEAVE_ROOM":
                 self.handle_leave_room(player_id)
@@ -299,7 +364,6 @@ class SplendorServer:
                         for p in room.players: parts.append({"id": p, "bot": False, "name": self.clients[p]["name"]})
                         for i in range(len(room.players), room.max_players): parts.append({"bot": True, "model": room.bot_settings.get(i, "Random Bot")})
                         random.shuffle(parts)
-                        
                         room.game = Game(p_count=room.max_players)
                         room.ai_map = {}
                         room.seat_map = {}
@@ -325,7 +389,6 @@ class SplendorServer:
                 if room and room.game_started:
                     game = room.game
                     s_idx = room.seat_map.get(player_id, -1)
-                    
                     if s_idx == game.curr_player_idx:
                         try:
                             if action['type'] == 'buy_card_index':
@@ -336,23 +399,35 @@ class SplendorServer:
                                 action = {'type': 'reserve_card', 'tier': t, 'card': game.board[t][s]}
                             elif action['type'] == 'buy_reserved_index':
                                 action = {'type': 'buy_reserved', 'card': game.players[s_idx].keeped[action['reserved_idx']]}
-
                             game.step(action)
                             msg = self.format_action_log(self.clients[player_id]['name'], action)
                             self.broadcast_to_room(rid, {"type": "GAME_LOG", "message": msg})
                             self.broadcast_to_room(rid, {"type": "GAME_STATE_UPDATE", "state": serialize_game(game)})
-                            
                             win = game.check_winner()
                             if win:
                                 self.broadcast_to_room(rid, {"type": "GAME_OVER", "winner": win.name})
+                                # Reset Room State for Rematch
+                                room.game_started = False
+                                room.game = None # Clear game instance
+                                room.seat_map = {} # Clear seat map (will be reshuffled)
+                                room.ai_map = {}
+                                room.disconnected_seats = set()
+                                
+                                # Reset Ready Status
+                                for pid in room.players:
+                                    if pid in self.clients:
+                                        self.clients[pid]["ready"] = False
+                                        
+                                # Broadcast update to switch UI back to Room (Wait) or refresh Lobby status
+                                self.broadcast_to_room(rid, {"type": "ROOM_UPDATE", "room": room.to_dict(self.clients)})
                                 return
                             
-                            if game.curr_player_idx in room.ai_map:
-                                self._process_ai_turns(rid, room)
+                            if game.curr_player_idx in room.ai_map: self._process_ai_turns(rid, room)
+                            else:
+                                self._check_and_skip_disconnected_turns(rid, room)
                             return
                         except: pass
                     else: response = {"type": "ERROR", "message": "Not your turn"}
-
         try: conn.send((json.dumps(response)+"\n").encode('utf-8'))
         except: pass
 
@@ -362,12 +437,97 @@ class SplendorServer:
         rid = c["room_id"]
         if rid in self.rooms:
             r = self.rooms[rid]
-            r.remove_player(player_id)
-            c["room_id"] = None
-            if not r.players: del self.rooms[rid]
+            
+            # Step 1: Update Room State
+            if r.game_started:
+                seat_idx = r.seat_map.get(player_id)
+                if seat_idx is not None:
+                    r.disconnected_seats.add(seat_idx)
+                    self.broadcast_to_room(rid, {"type": "GAME_LOG", "message": f"{c['name']} disconnected. Turns will be skipped."})
+                    # Attempt to skip turn if needed (but lock implies we handle this carefully)
+                    # We can't easily skip turn here if this was called from handle_disconnect (lock held?)
+                    # If this is from LEAVE_ROOM command, it's fine.
+                    # Let's rely on the main loop or next action to skip, OR call it if safe.
+                    # We will call it, assuming standard flow.
+                    try: self._check_and_skip_disconnected_turns(rid, r)
+                    except: pass
             else:
-                if r.host_id == player_id: r.host_id = r.players[0]
+                r.remove_player(player_id)
+            
+            c["room_id"] = None # Mark client as left
+            
+            # Step 2: Clean up Room if empty of ACTIVE players
+            active_count = 0
+            for pid in r.players:
+                # Check if player is still connected and in this room
+                client = self.clients.get(pid)
+                if client and client.get("room_id") == rid:
+                    active_count += 1
+            
+            # Also check observers? Usually we delete if no players. Observers get kicked.
+            
+            if active_count == 0:
+                del self.rooms[rid]
+                # print(f"Room {rid} deleted (No active players)")
+            else:
+                # Update Host if needed
+                if r.host_id == player_id or r.host_id not in self.clients or self.clients[r.host_id].get("room_id") != rid:
+                    # Find new host
+                    for pid in r.players:
+                        if pid in self.clients and self.clients[pid].get("room_id") == rid:
+                            r.host_id = pid
+                            self.broadcast_to_room(rid, {"type": "HOST_CHANGED", "new_host": pid})
+                            break
+                            
                 self.broadcast_to_room(rid, {"type": "ROOM_UPDATE", "room": r.to_dict(self.clients)})
+
+    def _check_and_skip_disconnected_turns(self, rid, room):
+        # Recursively skip turns for disconnected players
+        if not room.game: return
+        
+        limit = 0
+        while limit < 20: # Safety break
+            idx = room.game.curr_player_idx
+            
+            if idx in room.disconnected_seats:
+                # Add Delay for visibility
+                self.lock.release()
+                time.sleep(1.0)
+                self.lock.acquire()
+                
+                # Re-check state after sleep (game might have ended or player reconnected)
+                if not room.game_started or room.game.curr_player_idx != idx:
+                    break
+                if idx not in room.disconnected_seats: # Reconnected during sleep
+                    break
+
+                # Force Skip
+                room.game.step({'type': 'do_nothing'})
+                p_name = room.game.players[idx].name
+                self.broadcast_to_room(rid, {"type": "GAME_LOG", "message": f"{p_name} (Auto-Skip)"})
+                self.broadcast_to_room(rid, {"type": "GAME_STATE_UPDATE", "state": serialize_game(room.game)})
+                
+                win = room.game.check_winner()
+                if win:
+                    self.broadcast_to_room(rid, {"type": "GAME_OVER", "winner": win.name})
+                    # Reset Room
+                    room.game_started = False
+                    room.game = None
+                    room.seat_map = {}
+                    room.ai_map = {}
+                    room.disconnected_seats = set()
+                    for pid in room.players:
+                        if pid in self.clients: self.clients[pid]["ready"] = False
+                    self.broadcast_to_room(rid, {"type": "ROOM_UPDATE", "room": room.to_dict(self.clients)})
+                    return
+                
+                limit += 1
+            else:
+                # It's a valid player (Human or AI)
+                # If it's AI, run it.
+                if idx in room.ai_map:
+                    self._process_ai_turns(rid, room)
+                break
 
     def handle_disconnect(self, player_id):
         with self.lock:
@@ -379,7 +539,9 @@ class SplendorServer:
         r = self.rooms.get(rid)
         if not r: return
         data = (json.dumps(msg_dict) + "\n").encode('utf-8')
-        for pid in r.players:
+        # Send to players and observers
+        recipients = r.players + r.observers
+        for pid in recipients:
             c = self.clients.get(pid)
             if c:
                 try: c["conn"].send(data)
@@ -412,9 +574,21 @@ class SplendorServer:
                     win = g.check_winner()
                     if win:
                         self.broadcast_to_room(rid, {"type": "GAME_OVER", "winner": win.name})
+                        # Reset Room
+                        room.game_started = False
+                        room.game = None
+                        room.seat_map = {}
+                        room.ai_map = {}
+                        room.disconnected_seats = set()
+                        for pid in room.players:
+                            if pid in self.clients: self.clients[pid]["ready"] = False
+                        self.broadcast_to_room(rid, {"type": "ROOM_UPDATE", "room": room.to_dict(self.clients)})
                         return
                 except: g.next_turn(); break
-            else: break
+            else: 
+                # Next player is NOT AI. Check if they are disconnected.
+                self._check_and_skip_disconnected_turns(rid, room)
+                break
 
     def ai_discard_excess_tokens(self, game, p_idx):
         p = game.players[p_idx]
@@ -428,9 +602,17 @@ class SplendorServer:
         t = action['type']
         colors = ["White", "Blue", "Green", "Red", "Black", "Gold"]
         if t == 'get_token':
-            taken = [colors[i] for i, c in enumerate(action['tokens']) if c > 0]
-            return f"{name} took {', '.join(taken)}"
-        if t == 'buy_card' or t == 'buy_card_index': return f"{name} bought card"
+            tokens = action['tokens']
+            taken = []
+            for i, count in enumerate(tokens):
+                if count > 0:
+                    color_name = colors[i]
+                    if count == 2:
+                        taken.append(f"{color_name} x2")
+                    else:
+                        taken.append(color_name)
+            return f"{name}: +{', '.join(taken)}"
+        if t == 'buy_card' or t == 'buy_card_index': return f"{name}: Bought Card"
         if t == 'reserve_card' or t == 'reserve_card_index': return f"{name} reserved card"
         if t == 'reserve_deck': return f"{name} reserved from deck"
         if t == 'discard_token': return f"{name} discarded {colors[action['gem_idx']]}"
