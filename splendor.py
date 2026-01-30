@@ -905,8 +905,18 @@ class SplendorApp:
                                 mapping = data["your_seat_mapping"]
                                 if self.my_player_id in mapping:
                                     self.user_player_idx = mapping[self.my_player_id]
-                                # print(f"My Seat: {self.user_player_idx}")
-
+                            
+                            # Check Discard Condition after update
+                            if self.state == "ONLINE_GAME" and self.game.curr_player_idx == self.user_player_idx:
+                                me = self.game.players[self.user_player_idx]
+                                if me.token_count() > 10:
+                                    self.player_action_state = "DISCARDING_TOKENS"
+                                    self.log_action("Too many tokens! Select one to discard.")
+                                else:
+                                    # If I was discarding and now I'm fine, go IDLE (though usually turn ends automatically)
+                                    if self.player_action_state == "DISCARDING_TOKENS":
+                                        self.player_action_state = "IDLE"
+                            
                     elif msg_type == "ERROR":
                         err_msg = data.get('message', 'Unknown Error')
                         self.log_action(f"Server Error: {err_msg}")
@@ -2017,7 +2027,7 @@ class SplendorApp:
                         action = {'type': 'discard_token', 'gem_idx': i}
                         if self.state == "ONLINE_GAME":
                             self.req_game_action(action)
-                            self.player_action_state = "IDLE"
+                            # Do not reset to IDLE here. Wait for server update.
                             return
 
                         # self.log_action(f"Player {self.game.get_curr_player().name} discards {Gem(i).name}")
