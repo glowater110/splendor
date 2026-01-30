@@ -27,10 +27,9 @@ jobs:
         pip install -r requirements.txt
 
     - name: Build with PyInstaller
-      # Include logo.png and models folder.
-      # Windows separator is ;
+      # Simply build the script. Resources must be placed manually if needed.
       run: |
-        pyinstaller --onefile --noconsole --name "Splendor_Win" --add-data "logo.png;." --add-data "models/*.npz;models" splendor.py
+        pyinstaller --onefile --noconsole --name "Splendor_Win" splendor.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
@@ -67,10 +66,9 @@ jobs:
         pip install -r requirements.txt
 
     - name: Build with PyInstaller
-      # Include logo.png and models folder.
-      # macOS separator is :
+      # Simply build the script.
       run: |
-        pyinstaller --onefile --noconsole --name "Splendor_Mac" --add-data "logo.png:." --add-data "models/*.npz:models" splendor.py
+        pyinstaller --onefile --noconsole --name "Splendor_Mac" splendor.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
