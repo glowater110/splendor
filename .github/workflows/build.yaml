@@ -3,6 +3,10 @@ name: Build Splendor Game
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   # ---------------------------------------------------
@@ -23,17 +27,27 @@ jobs:
         pip install -r requirements.txt
 
     - name: Build with PyInstaller
-      # Removed --add-data because 'assets' folder does not exist.
-      # If you add images later, put them in an 'assets' folder and uncomment:
-      # pyinstaller --onefile --noconsole --name "Splendor_Win" --add-data "assets/*.png;assets" splendor_lite.py
+      # Include logo.png and models folder.
+      # Windows separator is ;
       run: |
-        pyinstaller --onefile --noconsole --name "Splendor_Win" splendor.py
+        pyinstaller --onefile --noconsole --name "Splendor_Win" --add-data "logo.png;." --add-data "models/*.npz;models" splendor.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: Splendor-Windows
         path: dist/Splendor_Win.exe
+
+    - name: Publish to Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: latest
+        name: Latest Build
+        files: dist/Splendor_Win.exe
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------
   # 2. Build for macOS
@@ -53,13 +67,24 @@ jobs:
         pip install -r requirements.txt
 
     - name: Build with PyInstaller
-      # Removed --add-data because 'assets' folder does not exist.
-      # macOS separator is colon (:).
+      # Include logo.png and models folder.
+      # macOS separator is :
       run: |
-        pyinstaller --onefile --noconsole --name "Splendor_Mac" splendor.py
+        pyinstaller --onefile --noconsole --name "Splendor_Mac" --add-data "logo.png:." --add-data "models/*.npz:models" splendor.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: Splendor-Mac
         path: dist/Splendor_Mac
+
+    - name: Publish to Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: latest
+        name: Latest Build
+        files: dist/Splendor_Mac
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
