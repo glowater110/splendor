@@ -19,7 +19,7 @@ if not model_name:
 start_model = input("Enter name of model to load WEIGHTS from (optional): ").strip()
 
 # Create log directory
-log_dir = f"logs_{model_name}/"
+log_dir = f"logs/logs_{model_name}/"
 os.makedirs(log_dir, exist_ok=True)
 
 # 1. Initialize Environment
