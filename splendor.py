@@ -307,6 +307,8 @@ class SplendorApp:
     def scan_ai_models(self):
         self.ai_models = ["Random Bot"]
         curr_dir = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, 'frozen', False):
+            curr_dir = os.path.dirname(sys.executable)
         for file in glob.glob(f"{curr_dir}/models/*.npz"):
             self.ai_models.append(os.path.basename(file))
             
