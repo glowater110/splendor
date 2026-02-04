@@ -145,15 +145,25 @@ def update_game_from_state(game, state):
         p.cards = [deserialize_card(c) for c in p_data["cards"]]
         p.keeped = [deserialize_card(c) for c in p_data["reserved"]]
 
+def resource_path(relative_path):
+    """ PyInstaller로 빌드된 exe와 일반 파이썬 스크립트 모두에서 경로를 찾는 함수 """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
 class SplendorApp:
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Splendor Online")
+        pygame.display.set_caption("Splendor")
         
         # Load and set App Icon
         try:
-            icon = pygame.image.load('logo.png')
+            icon_path = resource_path('assets/logo.png') 
+            icon = pygame.image.load(icon_path)
             pygame.display.set_icon(icon)
         except:
             # print("Logo file not found, skipping icon set.")
